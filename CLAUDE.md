@@ -76,7 +76,8 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - [ ] **3. KV state machine** — sessions, ReadIndex reads, no-op on election, client library.
 - [ ] **4. Linearizability checker + chaos harness** — checker self-tests (incl. pending ops), 500 chaos runs,
   deliberately break the system (e.g., follower reads), show it is caught, then revert. Add 50-seed chaos to CI.
-- [ ] **5. gRPC transport** — in-process 5-node real-threads/real-gRPC test FIRST, then Docker 5-node cluster, Docker-level chaos.
+- [ ] **5. gRPC transport** — GATE: before any Docker work, an in-process integration test runs 5 nodes with real
+  threads (one executor per node) and the real gRPC transport, and passes. Then the Docker 5-node cluster and Docker-level chaos.
 - [ ] **6. Snapshots + log compaction** (InstallSnapshot, session table included). Rerun the full chaos suite.
 - [ ] **7. Benchmarks + failover + optimizations** (AppendEntries batching/pipelining, group-commit fsync; before/after).
   Sanity runs in Codespaces; give exact commands for the Oracle VM.
@@ -86,6 +87,11 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 ## Status
 - Done: Phase 0.
 - Next: Phase 1 (storage). Waiting for the user to say "continue".
+
+## Known build warnings
+- `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
+  All come from the third-party protobuf Gradle plugin 0.10.0 (`ProtobufPlugin.groovy`, `ToolsLocator.groovy`),
+  not from our build scripts. Revisit when a newer plugin release fixes them. Our own scripts must stay warning-free.
 
 ## Commands
 - Build + all tests: `./gradlew build`
