@@ -2,6 +2,8 @@ package io.github.hard3007.raftkv.raft;
 
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesReply;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesRequest;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotReply;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotRequest;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteReply;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
 
@@ -11,4 +13,6 @@ public interface RaftRpcHandler {
     RequestVoteReply handleRequestVote(RequestVoteRequest request);
 
     AppendEntriesReply handleAppendEntries(AppendEntriesRequest request);
+
+    InstallSnapshotReply handleInstallSnapshot(InstallSnapshotRequest request);
 }

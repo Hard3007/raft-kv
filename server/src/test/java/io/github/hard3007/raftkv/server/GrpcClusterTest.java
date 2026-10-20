@@ -44,6 +44,9 @@ class GrpcClusterTest {
 
     private static final int NODES = 5;
 
+    /** Frequent snapshots in small chunks, so restarted nodes catch up via InstallSnapshot over real gRPC. */
+    private static final RaftConfig SNAPSHOTS = RaftConfig.defaults().withSnapshotThreshold(50).withSnapshotChunkBytes(512);
+
     @TempDir
     Path dataRoot;
 
@@ -66,7 +69,7 @@ class GrpcClusterTest {
 
     private void start(int id) throws IOException {
         nodes[id] = RaftKvNode.start(new NodeConfig(id, cluster, ports.get(id), 0, dataRoot.resolve("node-" + id),
-                RaftConfig.defaults(), 300));
+                SNAPSHOTS, 300));
         everyIncarnation.add(nodes[id]);
     }
 
@@ -189,6 +192,11 @@ class GrpcClusterTest {
         assertEquals(Verdict.LINEARIZABLE, result.verdict(), "key " + result.key() + ": " + result.operations());
         assertTrue(completed > 200, "too little progress: " + completed);
         assertTrue(crashes > 0 && isolations > 0 && connectionDrops > 0, "every fault type should have happened");
+        long snapshotsTaken = 0;
+        for (int id = 1; id <= NODES; id++) {
+            snapshotsTaken += nodes[id].status().snapshotsTaken();
+        }
+        System.out.printf("grpc chaos: snapshots taken by the final incarnations: %d%n", snapshotsTaken);
         everyIncarnation.forEach(node -> assertEquals(0, node.failedTasks(), "a task on node " + node.id() + " threw"));
     }
 

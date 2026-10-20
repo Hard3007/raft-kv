@@ -14,4 +14,8 @@ message RaftStateRecord {
   int32 voted_for = 2;            // 0 = voted for nobody in current_term
   int64 truncate_from = 3;        // 0 = none; otherwise drop every entry with index >= truncate_from first
   repeated LogEntry entries = 4;  // then append these
+  // Log compaction: the log now starts after compacted_through (whose term was compacted_term);
+  // entries at or below it are covered by the snapshot. Applied before truncate_from and entries.
+  int64 compacted_through = 5;
+  int64 compacted_term = 6;
 }

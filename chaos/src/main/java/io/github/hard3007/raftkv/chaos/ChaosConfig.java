@@ -1,6 +1,7 @@
 package io.github.hard3007.raftkv.chaos;
 
 import io.github.hard3007.raftkv.client.KvClient;
+import io.github.hard3007.raftkv.raft.RaftConfig;
 import java.time.Duration;
 
 /**
@@ -16,13 +17,16 @@ import java.time.Duration;
  * @param maxFaultGapMs      longest pause between two fault actions
  * @param clientOptions      client timeouts; give-up must be short enough that ops end
  * @param checkerTimeout     wall-clock budget for the linearizability check of one run
+ * @param raft               Raft settings; snapshots are frequent and chunks tiny, so every run
+ *                           exercises snapshotting, multi-chunk InstallSnapshot and compaction
  */
 public record ChaosConfig(int nodes, int clients, int keys, int operationsPerClient, int maxThinkMs,
-        int minFaultGapMs, int maxFaultGapMs, KvClient.Options clientOptions, Duration checkerTimeout) {
+        int minFaultGapMs, int maxFaultGapMs, KvClient.Options clientOptions, Duration checkerTimeout,
+        RaftConfig raft) {
 
     public static ChaosConfig defaults() {
         return new ChaosConfig(5, 5, 3, 60, 300, 100, 400, new KvClient.Options(1000, 50, 4000),
-                Duration.ofSeconds(10));
+                Duration.ofSeconds(10), RaftConfig.defaults().withSnapshotThreshold(20).withSnapshotChunkBytes(64));
     }
 
     public String describe() {
@@ -30,6 +34,8 @@ public record ChaosConfig(int nodes, int clients, int keys, int operationsPerCli
                 + " ops per client, think time 0-" + maxThinkMs + " ms, a fault action every " + minFaultGapMs + "-"
                 + maxFaultGapMs + " ms (virtual), client attempt timeout " + clientOptions.attemptTimeoutMs()
                 + " ms / give-up " + clientOptions.giveUpAfterMs() + " ms, checker timeout "
-                + checkerTimeout.toSeconds() + " s (wall)";
+                + checkerTimeout.toSeconds() + " s (wall); PreVote " + (raft.preVote() ? "on" : "off")
+                + ", CheckQuorum " + (raft.checkQuorum() ? "on" : "off") + ", a snapshot every "
+                + raft.snapshotThreshold() + " entries in " + raft.snapshotChunkBytes() + "-byte InstallSnapshot chunks";
     }
 }

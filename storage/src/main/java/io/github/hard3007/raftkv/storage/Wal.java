@@ -1,6 +1,7 @@
 package io.github.hard3007.raftkv.storage;
 
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.zip.CRC32;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,8 +26,9 @@ import org.slf4j.LoggerFactory;
  * the middle of the log; both are treated the same way, so mid-log bit rot loses the records
  * after it. Detecting that would need extra redundancy, which is out of scope.
  *
- * <p>The header is never modified in place. A new file (or a {@link #reset()}) is written to a
- * temporary file, fsynced, and atomically renamed over the old one, so the header is never torn.
+ * <p>The header is never modified in place. A new file (or a {@link #reset()} or {@link #rewrite})
+ * is written to a temporary file, fsynced, and atomically renamed over the old one, so the header is
+ * never torn.
  *
  * <p>Not thread-safe: callers serialize access.
  */
@@ -69,7 +71,7 @@ public final class Wal implements AutoCloseable {
      */
     public static Wal open(FileSystem fileSystem, String name, FsyncPolicy fsyncPolicy, RecordHandler handler) {
         if (!fileSystem.exists(name)) {
-            writeEmptyFile(fileSystem, name, 1);
+            writeFile(fileSystem, name, 1, List.of());
         }
         Wal wal = new Wal(fileSystem, name, fsyncPolicy);
         wal.recover(handler);
@@ -111,13 +113,10 @@ public final class Wal implements AutoCloseable {
         if (payload.length > MAX_RECORD_SIZE) {
             throw new IllegalArgumentException("record too large: " + payload.length + " bytes");
         }
-        ByteBuffer record = ByteBuffer.allocate(RECORD_HEADER_SIZE + payload.length);
-        record.putInt(payload.length);
-        record.putInt(checksum(payload.length, payload));
-        record.put(payload);
-        file.write(endOffset, record.array(), 0, record.capacity());
+        byte[] record = encodeRecord(payload);
+        file.write(endOffset, record, 0, record.length);
 
-        endOffset += record.capacity();
+        endOffset += record.length;
         lastLsn++;
         if (fsyncPolicy == FsyncPolicy.ALWAYS) {
             sync();
@@ -135,11 +134,22 @@ public final class Wal implements AutoCloseable {
 
     /** Discards every record. The next append gets LSN {@code lastLsn() + 1}. */
     public void reset() {
+        rewrite(List.of());
+    }
+
+    /**
+     * Atomically replaces the whole log with {@code records}: they are written to a temporary file,
+     * fsynced, and renamed over the log. After a crash the log holds either the old records or
+     * exactly these. LSNs keep increasing: the first new record gets {@code lastLsn() + 1}.
+     */
+    public void rewrite(List<byte[]> records) {
         file.close();
-        writeEmptyFile(fileSystem, name, lastLsn + 1);
+        long first = lastLsn + 1;
+        writeFile(fileSystem, name, first, records);
         file = fileSystem.open(name);
-        firstLsn = lastLsn + 1;
-        endOffset = HEADER_SIZE;
+        firstLsn = first;
+        endOffset = file.size();
+        lastLsn = first + records.size() - 1;
         durableLsn = lastLsn;
     }
 
@@ -167,7 +177,7 @@ public final class Wal implements AutoCloseable {
         file.close();
     }
 
-    private static void writeEmptyFile(FileSystem fileSystem, String name, long firstLsn) {
+    private static void writeFile(FileSystem fileSystem, String name, long firstLsn, List<byte[]> records) {
         String temporary = name + ".tmp";
         fileSystem.delete(temporary);
         try (StorageFile tmp = fileSystem.open(temporary)) {
@@ -175,9 +185,23 @@ public final class Wal implements AutoCloseable {
             header.putInt(MAGIC).putInt(VERSION).putLong(firstLsn);
             header.putInt(crc(header.array(), 0, 16));
             tmp.write(0, header.array(), 0, HEADER_SIZE);
+            long offset = HEADER_SIZE;
+            for (byte[] payload : records) {
+                byte[] record = encodeRecord(payload);
+                tmp.write(offset, record, 0, record.length);
+                offset += record.length;
+            }
             tmp.force();
         }
         fileSystem.replace(temporary, name);
+    }
+
+    private static byte[] encodeRecord(byte[] payload) {
+        ByteBuffer record = ByteBuffer.allocate(RECORD_HEADER_SIZE + payload.length);
+        record.putInt(payload.length);
+        record.putInt(checksum(payload.length, payload));
+        record.put(payload);
+        return record.array();
     }
 
     private static long readHeader(StorageFile file, String name) {

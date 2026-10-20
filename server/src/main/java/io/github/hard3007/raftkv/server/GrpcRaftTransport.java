@@ -2,6 +2,8 @@ package io.github.hard3007.raftkv.server;
 
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesReply;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesRequest;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotReply;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotRequest;
 import io.github.hard3007.raftkv.proto.raft.RaftServiceGrpc;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteReply;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
@@ -73,6 +75,13 @@ public final class GrpcRaftTransport implements Transport, AutoCloseable {
     public void appendEntries(int peer, AppendEntriesRequest request, Consumer<AppendEntriesReply> onReply) {
         if (!blockedPeers.contains(peer)) {
             stub(peer).appendEntries(request, observer(peer, "AppendEntries", onReply));
+        }
+    }
+
+    @Override
+    public void installSnapshot(int peer, InstallSnapshotRequest request, Consumer<InstallSnapshotReply> onReply) {
+        if (!blockedPeers.contains(peer)) {
+            stub(peer).installSnapshot(request, observer(peer, "InstallSnapshot", onReply));
         }
     }
 

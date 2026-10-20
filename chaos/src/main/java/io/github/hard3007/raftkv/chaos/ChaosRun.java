@@ -2,12 +2,14 @@ package io.github.hard3007.raftkv.chaos;
 
 import io.github.hard3007.raftkv.client.KvClient;
 import io.github.hard3007.raftkv.client.KvResult;
+import io.github.hard3007.raftkv.kv.KvService;
 import io.github.hard3007.raftkv.kv.sim.SimKvCluster;
 import io.github.hard3007.raftkv.linearizability.CheckResult;
 import io.github.hard3007.raftkv.linearizability.History;
 import io.github.hard3007.raftkv.linearizability.LinearizabilityChecker;
 import io.github.hard3007.raftkv.linearizability.Operation;
 import io.github.hard3007.raftkv.linearizability.Verdict;
+import io.github.hard3007.raftkv.storage.SimulatedCrashException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -15,6 +17,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 /**
  * One seeded chaos run: a simulated cluster, concurrent clients doing random operations on a few
@@ -22,7 +25,9 @@ import java.util.Set;
  * linearizability checker. The same seed always produces the same run.
  *
  * <p><b>Faults</b> (one action every 100-400 ms of virtual time, chosen at random):
- * crash a node (power loss; at most two down at once), restart a crashed node, isolate the
+ * crash a node (power loss; at most two down at once), arm a crash at one of a node's next 0-30
+ * I/O operations (so crashes also land mid-append, mid-snapshot, mid-install), restart a crashed
+ * node, isolate the
  * leader together with some clients, split the cluster into a random minority and majority
  * (clients assigned to random sides), heal all partitions, toggle 10% message loss, and toggle
  * long delays (some messages delayed 0.2-2 s, which reorders them and makes clients retry while
@@ -35,12 +40,23 @@ import java.util.Set;
 final class ChaosRun {
 
     /** What one run did, for the report. */
-    record Stats(int operations, int completed, int pendingWrites, int discardedReads, int crashes, int partitions,
-            int lossPeriods, int longDelayPeriods, long messagesLost, long virtualMillis) {
+    record Stats(int operations, int completed, int pendingWrites, int discardedReads, int crashes, int midIoCrashes,
+            int partitions,
+            int lossPeriods, int longDelayPeriods, long messagesLost, long virtualMillis, long snapshotsTaken,
+            long snapshotsInstalled, long finalTerm) {
     }
 
+    /**
+     * {@code error} is set (and {@code verdict} is null) if the system itself failed an internal
+     * check during the run: a safety assertion in the test harness, or a node refusing to start
+     * because committed entries were lost. Such a run never passes.
+     */
     record Result(long seed, Verdict verdict, Stats stats, CheckResult check, List<String> faultLog,
-            List<Operation> history, long wallMillis) {
+            List<Operation> history, long wallMillis, String error) {
+
+        boolean passed() {
+            return error == null && verdict == Verdict.LINEARIZABLE;
+        }
     }
 
     private final long seed;
@@ -56,6 +72,8 @@ final class ChaosRun {
     private int pendingWrites;
     private int discardedReads;
     private int crashes;
+    private int midIoCrashes;
+    private final Set<Integer> armed = new HashSet<>();
     private int partitions;
     private int lossPeriods;
     private int longDelayPeriods;
@@ -65,13 +83,19 @@ final class ChaosRun {
     private ChaosRun(long seed, ChaosConfig config) {
         this.seed = seed;
         this.config = config;
-        this.cluster = new SimKvCluster(config.nodes(), seed);
+        this.cluster = new SimKvCluster(config.nodes(), seed, config.raft(), KvService.Options.defaults());
         this.random = cluster.sim.random();
         this.history = History.forSimulation(cluster.sim::now);
     }
 
     static Result run(long seed, ChaosConfig config) {
-        return new ChaosRun(seed, config).execute();
+        ChaosRun run = new ChaosRun(seed, config);
+        try {
+            return run.execute();
+        } catch (RuntimeException | AssertionError failure) {
+            run.log("internal check failed: " + failure);
+            return new Result(seed, null, null, null, run.faultLog, List.of(), 0, failure.toString());
+        }
     }
 
     private Result execute() {
@@ -88,16 +112,18 @@ final class ChaosRun {
 
         // Run until every client finished. Ops always end (clients give up), so this terminates;
         // the cap only guards against a bug.
-        cluster.sim.runUntil(() -> clientsFinished == config.clients(), 3_600_000);
+        run(() -> clientsFinished == config.clients(), 3_600_000);
         healEverything();
-        cluster.sim.runFor(1_000);
+        long settleUntil = cluster.sim.now() + 1_000;
+        run(() -> cluster.sim.now() >= settleUntil, 1_000);
 
         List<Operation> operations = history.operations();
         CheckResult check = new LinearizabilityChecker(config.checkerTimeout()).check(operations);
         Stats stats = new Stats(operations.size() + discardedReads, completed, pendingWrites, discardedReads, crashes,
-                partitions, lossPeriods, longDelayPeriods, cluster.network.messagesLost(), cluster.sim.now());
+                midIoCrashes, partitions, lossPeriods, longDelayPeriods, cluster.network.messagesLost(), cluster.sim.now(),
+                cluster.snapshotsTaken(), cluster.snapshotsInstalled(), highestTerm());
         return new Result(seed, check.verdict(), stats, check, faultLog, operations,
-                System.currentTimeMillis() - wallStart);
+                System.currentTimeMillis() - wallStart, null);
     }
 
     // ------------------------------------------------------------------ workload
@@ -172,9 +198,10 @@ final class ChaosRun {
     }
 
     private void injectFault() {
-        switch (random.nextInt(7)) {
+        switch (random.nextInt(8)) {
             case 0 -> crashSomeNode();
             case 1 -> restartSomeNode();
+            case 7 -> armCrashAtNextIo();
             case 2 -> isolateLeader();
             case 3 -> randomSplit();
             case 4 -> {
@@ -203,11 +230,12 @@ final class ChaosRun {
                 alive.add(i);
             }
         }
-        if (alive.size() <= config.nodes() - 2) {
+        if (alive.size() - armed.size() <= config.nodes() - 2) {
             return; // at most two down at a time, so a majority can still make progress
         }
         int victim = alive.get(random.nextInt(alive.size()));
         cluster.crash(victim);
+        armed.remove(victim);
         crashes++;
         log("crash node " + victim);
     }
@@ -216,6 +244,7 @@ final class ChaosRun {
         for (int i = 1; i <= config.nodes(); i++) {
             int candidate = 1 + (i + random.nextInt(config.nodes())) % config.nodes();
             if (!cluster.isAlive(candidate)) {
+                armed.remove(candidate);
                 cluster.restart(candidate);
                 log("restart node " + candidate);
                 return;
@@ -259,7 +288,56 @@ final class ChaosRun {
         log(description + " (minority side: " + minority + ")");
     }
 
+    /** Runs the simulation; a crash armed by the nemesis can land in any event, and power-cycles that node. */
+    private void run(BooleanSupplier until, long maxMillis) {
+        long deadline = cluster.sim.now() + maxMillis;
+        while (true) {
+            try {
+                cluster.sim.runUntil(until, deadline - cluster.sim.now());
+                return;
+            } catch (SimulatedCrashException crash) {
+                powerCycleTheNodeWhoseDiskFailed();
+            }
+        }
+    }
+
+    /** Arms a crash at one of a live node's next 0-30 mutating I/O operations (write, fsync, rename, ...). */
+    private void armCrashAtNextIo() {
+        int node = 1 + random.nextInt(config.nodes());
+        if (cluster.isAlive(node) && !armed.contains(node) && liveNodes() > config.nodes() - 2) {
+            cluster.disk(node).crashAfter(random.nextInt(31));
+            armed.add(node);
+            log("arm crash at a coming I/O on node " + node);
+        }
+    }
+
+    private void powerCycleTheNodeWhoseDiskFailed() {
+        for (int i = 1; i <= config.nodes(); i++) {
+            if (cluster.isAlive(i) && cluster.disk(i).hasCrashed()) {
+                cluster.crash(i); // power loss: un-fsynced writes are lost or torn
+                armed.remove(i);
+                midIoCrashes++;
+                crashes++;
+                log("node " + i + " crashed in the middle of an I/O operation");
+                return;
+            }
+        }
+        throw new IllegalStateException("a simulated crash fired, but no live node's disk failed");
+    }
+
+    private int liveNodes() {
+        int live = 0;
+        for (int i = 1; i <= config.nodes(); i++) {
+            live += cluster.isAlive(i) ? 1 : 0;
+        }
+        return live;
+    }
+
     private void healEverything() {
+        for (int node : armed) {
+            cluster.disk(node).crashAfter(-1); // disarm crashes that have not fired yet
+        }
+        armed.clear();
         cluster.network.heal();
         cluster.network.setUnreliable(false);
         cluster.network.setLongDelays(false);
@@ -269,6 +347,14 @@ final class ChaosRun {
             }
         }
         log("final heal");
+    }
+
+    private long highestTerm() {
+        long highest = 0;
+        for (int i = 1; i <= config.nodes(); i++) {
+            highest = Math.max(highest, cluster.raft(i).status().term());
+        }
+        return highest;
     }
 
     private void log(String event) {

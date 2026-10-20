@@ -9,6 +9,7 @@
 #   reads-without-readindex   the leader serves reads without the confirming heartbeat round
 #   no-session-dedup          every copy of a write is applied (no exactly-once)
 #   follower-reads            followers answer reads from their own state machine
+#   compact-before-snapshot   the log prefix is discarded before the snapshot covering it is durable
 #
 # The report goes to reports/chaos/chaos-mutation-<mutation>-<runs>-seeds.md.
 set -euo pipefail
@@ -26,6 +27,11 @@ case "$mutation" in
   no-session-dedup)
     file=kv/src/main/java/io/github/hard3007/raftkv/kv/KvStateMachine.java
     patch='s/        if \(session.isPresent\(\)\) \{\n.*?\n        \}\n\n        boolean existed/        boolean existed/s'
+    ;;
+  compact-before-snapshot)
+    file=raft/src/main/java/io/github/hard3007/raftkv/raft/RaftNode.java
+    # Drop the log prefix (and rewrite the WAL) before the snapshot that covers it is durable.
+    patch='s/        storage.snapshots\(\).save\(index, term, stateMachine.takeSnapshot\(\)\);\n        log.compactThrough\(index\);\n        storage.rewrite\((.*?)\);\n/        byte[] data = stateMachine.takeSnapshot();\n        log.compactThrough(index);\n        storage.rewrite($1);\n        storage.snapshots().save(index, term, data);\n/'
     ;;
   follower-reads)
     file=kv/src/main/java/io/github/hard3007/raftkv/kv/KvService.java

@@ -2,6 +2,8 @@ package io.github.hard3007.raftkv.raft.sim;
 
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesReply;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesRequest;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotReply;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotRequest;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteReply;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
 import io.github.hard3007.raftkv.raft.RaftRpcHandler;
@@ -219,6 +221,11 @@ public final class SimNetwork {
         @Override
         public void appendEntries(int peer, AppendEntriesRequest request, Consumer<AppendEntriesReply> onReply) {
             call(self, peer, request, id -> raftHandler(id, RaftRpcHandler::handleAppendEntries), onReply);
+        }
+
+        @Override
+        public void installSnapshot(int peer, InstallSnapshotRequest request, Consumer<InstallSnapshotReply> onReply) {
+            call(self, peer, request, id -> raftHandler(id, RaftRpcHandler::handleInstallSnapshot), onReply);
         }
     }
 }

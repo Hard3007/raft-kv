@@ -55,6 +55,7 @@ public final class DockerChaosMain {
     private final Map<String, Double> peakMemoryMib = new TreeMap<>();
     private String memoryLimit = "?";
     private long finalTerm = -1;
+    private Map<Integer, Map<String, Long>> finalStatus = new TreeMap<>();
 
     private DockerChaosMain(String project) {
         this.project = project;
@@ -131,7 +132,8 @@ public final class DockerChaosMain {
         }
         clients.forEach(BlockingKvClient::close);
         long wallMillis = (System.nanoTime() - start) / 1_000_000;
-        finalTerm = highestTerm();
+        finalStatus = statusOfEveryNode();
+        finalTerm = finalStatus.values().stream().mapToLong(s -> s.getOrDefault("term", -1L)).max().orElse(-1);
 
         List<Operation> operations = history.operations();
         long checkStart = System.nanoTime();
@@ -234,18 +236,23 @@ public final class DockerChaosMain {
         }
     }
 
-    /** The highest current term reported by any node's /status, or -1. Every election bumps the term. */
-    private static long highestTerm() {
-        long highest = -1;
+    /** Each node's numeric /status fields (term, snapshotIndex, ...), for nodes that answered. */
+    private static Map<Integer, Map<String, Long>> statusOfEveryNode() {
+        Map<Integer, Map<String, Long>> all = new TreeMap<>();
+        Pattern field = Pattern.compile("\"(\\w+)\":(\\d+)");
         for (int node = 1; node <= 5; node++) {
             String status = run("curl", "-fsS", "--max-time", "2", "http://localhost:" + (8080 + node) + "/status");
-            Matcher term = status == null ? null
-                    : Pattern.compile("\"term\":(\\d+)").matcher(status);
-            if (term != null && term.find()) {
-                highest = Math.max(highest, Long.parseLong(term.group(1)));
+            if (status == null) {
+                continue;
             }
+            Map<String, Long> fields = new TreeMap<>();
+            Matcher m = field.matcher(status);
+            while (m.find()) {
+                fields.put(m.group(1), Long.parseLong(m.group(2)));
+            }
+            all.put(node, fields);
         }
-        return highest;
+        return all;
     }
 
     // ------------------------------------------------------------------ report
@@ -263,7 +270,8 @@ public final class DockerChaosMain {
                 .append(String.valueOf(run("docker", "version", "--format", "{{.Server.Version}}")).trim()).append("\n");
         md.append("- **Setup:** 5 containers (docker-compose.yml), ").append(clientCount)
                 .append(" client threads on the host, 3 shared keys; a fault every 1-3 s, each undone after 2-5 s,"
-                        + " at most two nodes faulty at once\n\n");
+                        + " at most two nodes faulty at once; a snapshot every ")
+                .append(System.getenv().getOrDefault("SNAPSHOT_THRESHOLD", "10000")).append(" entries\n\n");
         md.append("## Verdict\n\n**").append(result.verdict()).append("**")
                 .append(result.key() == null ? "" : " (key " + result.key() + ")").append(", checked in ")
                 .append(checkMillis).append(" ms.\n\n");
@@ -282,6 +290,13 @@ public final class DockerChaosMain {
                 case DISCONNECT -> "network disconnect";
             }).append("` | ").append(injected.getOrDefault(fault, 0)).append(" |\n");
         }
+        md.append("\n## Snapshots (from each node's /status at the end)\n\n"
+                + "Counters are per process, so they restart at 0 after a `docker kill`; the snapshot index is durable.\n\n"
+                + "| Node | Snapshot index (log compacted through) | Last applied | Snapshots taken | InstallSnapshots received |\n"
+                + "|---|---|---|---|---|\n");
+        finalStatus.forEach((node, s) -> md.append("| ").append(node).append(" | ").append(s.get("snapshotIndex"))
+                .append(" | ").append(s.get("lastApplied")).append(" | ").append(s.get("snapshotsTaken"))
+                .append(" | ").append(s.get("snapshotsInstalled")).append(" |\n"));
         md.append("\n## Peak memory per container (docker stats, sampled every 5 s)\n\n| Container | Peak | Limit |\n|---|---|---|\n");
         peakMemoryMib.forEach((name, mib) -> md.append("| ").append(name).append(" | ")
                 .append(String.format("%.0f MiB", mib)).append(" | ").append(memoryLimit).append(" |\n"));

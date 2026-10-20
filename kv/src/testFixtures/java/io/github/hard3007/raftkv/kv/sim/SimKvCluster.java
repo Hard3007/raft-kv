@@ -65,6 +65,8 @@ public final class SimKvCluster {
     private final Map<Long, Integer> leaderOfTerm = new HashMap<>();
     private final List<ApplyObserver> observers = new ArrayList<>();
     private int nextClientEndpoint = 1001;
+    private long snapshotsTakenByDeadIncarnations;
+    private long snapshotsInstalledByDeadIncarnations;
 
     public SimKvCluster(int size, long seed) {
         this(size, seed, RaftConfig.defaults(), KvService.Options.defaults());
@@ -103,13 +105,15 @@ public final class SimKvCluster {
         Node node = new Node();
         node.scheduler = sim.newNodeScheduler();
         RaftStorage storage = RaftStorage.open(disks[i], "raft.wal");
-        BTree tree = BTree.open(disks[i], "kv", new BTree.Options(64, FsyncPolicy.LAZY, 1 << 20));
-        node.stateMachine = new KvStateMachine(tree, 20); // sync often, so restarts resume mid-log
-        node.lastAppliedIndex = node.stateMachine.appliedIndex();
+        // Sync the tree often, so restarts resume mid-log rather than from an empty state.
+        node.stateMachine = KvStateMachine.open(disks[i], "kv", new BTree.Options(64, FsyncPolicy.LAZY, 1 << 20), 20);
         int nodeId = i;
         node.stateMachine.addListener((entry, result) -> onApply(nodeId, entry, result));
+        // A snapshot restore legitimately jumps the applied index forward.
+        node.stateMachine.addRestoreListener(index -> node.lastAppliedIndex = index);
         node.raft = new RaftNode(i, peers, config, node.scheduler, network.transportFor(i), storage,
                 node.stateMachine, node.stateMachine.appliedIndex(), new Random(random.nextLong()));
+        node.lastAppliedIndex = node.stateMachine.appliedIndex(); // after a possible restore at startup
         node.service = new KvService(node.raft, node.stateMachine, node.scheduler, addresses, serviceOptions);
         nodes[i] = node;
         network.register(i, node.raft);
@@ -123,6 +127,9 @@ public final class SimKvCluster {
         if (nodes[i] == null) {
             return;
         }
+        RaftNode.Status last = nodes[i].raft.status();
+        snapshotsTakenByDeadIncarnations += last.snapshotsTaken();
+        snapshotsInstalledByDeadIncarnations += last.snapshotsInstalled();
         nodes[i].scheduler.kill();
         nodes[i].raft.stop();
         network.unregister(i);
@@ -174,6 +181,29 @@ public final class SimKvCluster {
     public int awaitLeader(long maxMillis) {
         sim.runUntil(() -> leader() != -1, maxMillis);
         return leader();
+    }
+
+    /** Snapshots taken by every node so far, including incarnations that have since crashed. */
+    public long snapshotsTaken() {
+        long total = snapshotsTakenByDeadIncarnations;
+        for (int i = 1; i <= size; i++) {
+            total += nodes[i] == null ? 0 : nodes[i].raft.status().snapshotsTaken();
+        }
+        return total;
+    }
+
+    /** InstallSnapshots completed by every node so far, including crashed incarnations. */
+    public long snapshotsInstalled() {
+        long total = snapshotsInstalledByDeadIncarnations;
+        for (int i = 1; i <= size; i++) {
+            total += nodes[i] == null ? 0 : nodes[i].raft.status().snapshotsInstalled();
+        }
+        return total;
+    }
+
+    /** A node's simulated disk, for crash-injection tests. */
+    public SimulatedFileSystem disk(int i) {
+        return disks[i];
     }
 
     public void addObserver(ApplyObserver observer) {

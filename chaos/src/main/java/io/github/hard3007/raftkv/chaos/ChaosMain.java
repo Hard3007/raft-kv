@@ -58,22 +58,23 @@ public final class ChaosMain {
         for (Verdict verdict : Verdict.values()) {
             counts.put(verdict, 0);
         }
-        results.forEach(r -> counts.merge(r.verdict(), 1, Integer::sum));
+        results.stream().filter(r -> r.error() == null).forEach(r -> counts.merge(r.verdict(), 1, Integer::sum));
+        long errors = results.stream().filter(r -> r.error() != null).count();
 
         String command = "./gradlew chaos -Pruns=" + runs + (startSeed != 1 ? " -PstartSeed=" + startSeed : "")
                 + (label.equals("baseline") ? "" : " -Plabel=" + label);
-        writeReport(report, label, command, config, results, counts, wallMillis);
+        writeReport(report, label, command, config, results, counts, errors, wallMillis);
         writeCsv(Path.of(report.toString().replaceAll("\\.md$", ".csv")), results);
 
         for (ChaosRun.Result r : results) {
-            if (verbose || r.verdict() != Verdict.LINEARIZABLE) {
+            if (verbose || !r.passed()) {
                 printDetails(r, verbose);
             }
         }
-        System.out.printf("LINEARIZABLE=%d NOT_LINEARIZABLE=%d INCONCLUSIVE=%d  wall=%.1fs  report=%s%n",
+        System.out.printf("LINEARIZABLE=%d NOT_LINEARIZABLE=%d INCONCLUSIVE=%d INTERNAL_FAILURE=%d  wall=%.1fs  report=%s%n",
                 counts.get(Verdict.LINEARIZABLE), counts.get(Verdict.NOT_LINEARIZABLE), counts.get(Verdict.INCONCLUSIVE),
-                wallMillis / 1000.0, report);
-        System.exit(counts.get(Verdict.LINEARIZABLE) == runs ? 0 : 1);
+                errors, wallMillis / 1000.0, report);
+        System.exit(counts.get(Verdict.LINEARIZABLE) == runs && errors == 0 ? 0 : 1);
     }
 
     private static List<ChaosRun.Result> runAll(int runs, long startSeed, ChaosConfig config, int threads)
@@ -102,7 +103,8 @@ public final class ChaosMain {
     // ------------------------------------------------------------------ report
 
     private static void writeReport(Path path, String label, String command, ChaosConfig config,
-            List<ChaosRun.Result> results, Map<Verdict, Integer> counts, long wallMillis) throws IOException {
+            List<ChaosRun.Result> results, Map<Verdict, Integer> counts, long errors, long wallMillis)
+            throws IOException {
         StringBuilder md = new StringBuilder();
         md.append("# Chaos report: ").append(label).append("\n\n");
         md.append("- **Command:** `").append(command).append("`\n");
@@ -118,30 +120,41 @@ public final class ChaosMain {
         for (Verdict verdict : Verdict.values()) {
             md.append("| ").append(verdict).append(" | ").append(counts.get(verdict)).append(" |\n");
         }
-        md.append("\nOnly LINEARIZABLE runs count as passing. INCONCLUSIVE means the checker ran out of time.\n\n");
+        md.append("| runs where the system failed an internal check | ").append(errors).append(" |\n");
+        md.append("\nOnly LINEARIZABLE runs count as passing. INCONCLUSIVE means the checker ran out of time. An"
+                + " internal-check failure (a safety assertion, or a node refusing to start because committed"
+                + " entries were lost) has no verdict and does not pass either.\n\n");
+        List<ChaosRun.Result> measured = results.stream().filter(r -> r.stats() != null).toList();
 
         md.append("## Per seed (min / mean / max)\n\n| Measure | Min | Mean | Max |\n|---|---|---|---|\n");
-        row(md, "operations", results, r -> r.stats().operations());
-        row(md, "completed operations", results, r -> r.stats().completed());
-        row(md, "pending writes (unknown outcome)", results, r -> r.stats().pendingWrites());
-        row(md, "reads left out (no definite answer)", results, r -> r.stats().discardedReads());
-        row(md, "node crashes (power loss)", results, r -> r.stats().crashes());
-        row(md, "partitions", results, r -> r.stats().partitions());
-        row(md, "message-loss periods", results, r -> r.stats().lossPeriods());
-        row(md, "messages lost", results, r -> r.stats().messagesLost());
-        row(md, "long-delay periods", results, r -> r.stats().longDelayPeriods());
-        row(md, "virtual time (s)", results, r -> r.stats().virtualMillis() / 1000.0);
-        row(md, "wall time (ms)", results, r -> r.wallMillis());
+        row(md, "operations", measured, r -> r.stats().operations());
+        row(md, "completed operations", measured, r -> r.stats().completed());
+        row(md, "pending writes (unknown outcome)", measured, r -> r.stats().pendingWrites());
+        row(md, "reads left out (no definite answer)", measured, r -> r.stats().discardedReads());
+        row(md, "node crashes (power loss)", measured, r -> r.stats().crashes());
+        row(md, "  of which mid-I/O (crash at a random write/fsync/rename)", measured, r -> r.stats().midIoCrashes());
+        row(md, "partitions", measured, r -> r.stats().partitions());
+        row(md, "message-loss periods", measured, r -> r.stats().lossPeriods());
+        row(md, "messages lost", measured, r -> r.stats().messagesLost());
+        row(md, "long-delay periods", measured, r -> r.stats().longDelayPeriods());
+        row(md, "snapshots taken (all nodes)", measured, r -> r.stats().snapshotsTaken());
+        row(md, "InstallSnapshots completed (all nodes)", measured, r -> r.stats().snapshotsInstalled());
+        row(md, "final term (highest across nodes)", measured, r -> r.stats().finalTerm());
+        row(md, "virtual time (s)", measured, r -> r.stats().virtualMillis() / 1000.0);
+        row(md, "wall time (ms)", measured, r -> r.wallMillis());
 
-        List<ChaosRun.Result> failing = results.stream().filter(r -> r.verdict() != Verdict.LINEARIZABLE).toList();
+        List<ChaosRun.Result> failing = results.stream().filter(r -> !r.passed()).toList();
         md.append("\n## Runs that did not pass\n\n");
         if (failing.isEmpty()) {
             md.append("None.\n");
         } else {
-            md.append("| Seed | Verdict | Key | Ops on key | Reproduce |\n|---|---|---|---|---|\n");
+            md.append("| Seed | Verdict | Key / failure | Ops on key | Reproduce |\n|---|---|---|---|---|\n");
             for (ChaosRun.Result r : failing) {
-                md.append("| ").append(r.seed()).append(" | ").append(r.verdict()).append(" | ").append(r.check().key())
-                        .append(" | ").append(r.check().operations().size()).append(" | `./gradlew chaos -Pruns=1 -PstartSeed=")
+                boolean error = r.error() != null;
+                md.append("| ").append(r.seed()).append(" | ").append(error ? "INTERNAL_FAILURE" : r.verdict()).append(" | ")
+                        .append(error ? r.error().replace("|", "/") : r.check().key())
+                        .append(" | ").append(error ? "-" : r.check().operations().size())
+                        .append(" | `./gradlew chaos -Pruns=1 -PstartSeed=")
                         .append(r.seed()).append(label.equals("baseline") ? "" : " -Plabel=" + label)
                         .append(" -Pverbose` |\n");
             }
@@ -165,20 +178,34 @@ public final class ChaosMain {
 
     private static void writeCsv(Path path, List<ChaosRun.Result> results) throws IOException {
         StringBuilder csv = new StringBuilder("seed,verdict,operations,completed,pending_writes,discarded_reads,"
-                + "crashes,partitions,loss_periods,messages_lost,long_delay_periods,virtual_ms,wall_ms\n");
+                + "crashes,mid_io_crashes,partitions,loss_periods,messages_lost,long_delay_periods,snapshots_taken,"
+                + "snapshots_installed,final_term,virtual_ms,wall_ms\n");
         for (ChaosRun.Result r : results) {
             ChaosRun.Stats s = r.stats();
+            if (s == null) {
+                csv.append(r.seed()).append(",INTERNAL_FAILURE\n");
+                continue;
+            }
             csv.append(r.seed()).append(',').append(r.verdict()).append(',').append(s.operations()).append(',')
                     .append(s.completed()).append(',').append(s.pendingWrites()).append(',').append(s.discardedReads())
-                    .append(',').append(s.crashes()).append(',').append(s.partitions()).append(',')
+                    .append(',').append(s.crashes()).append(',').append(s.midIoCrashes()).append(',').append(s.partitions()).append(',')
                     .append(s.lossPeriods()).append(',').append(s.messagesLost()).append(',')
-                    .append(s.longDelayPeriods()).append(',').append(s.virtualMillis()).append(',')
+                    .append(s.longDelayPeriods()).append(',').append(s.snapshotsTaken()).append(',')
+                    .append(s.snapshotsInstalled()).append(',').append(s.finalTerm()).append(',')
+                    .append(s.virtualMillis()).append(',')
                     .append(r.wallMillis()).append('\n');
         }
         Files.writeString(path, csv.toString(), StandardCharsets.UTF_8);
     }
 
     private static void printDetails(ChaosRun.Result r, boolean verbose) {
+        if (r.error() != null) {
+            System.out.printf("%nseed %d: INTERNAL_FAILURE %s%n", r.seed(), r.error());
+            if (verbose) {
+                r.faultLog().forEach(line -> System.out.println("    " + line));
+            }
+            return;
+        }
         System.out.printf("%nseed %d: %s%s%n", r.seed(), r.verdict(),
                 r.check().key() == null ? "" : " (key " + r.check().key() + ", " + r.check().operations().size() + " ops)");
         if (verbose) {

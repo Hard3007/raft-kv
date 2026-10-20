@@ -105,6 +105,23 @@ class KvClusterTest {
         assertTrue(ok(cluster.<Optional<byte[]>>await(done -> client.get(b("k"), done), WAIT)).isEmpty());
     }
 
+    /**
+     * Regression: a single-node cluster commits without any network round trip. It once applied
+     * the entry inside propose(), before KvService had recorded the proposal, so the client never
+     * got its reply and every write was retried (and committed again) until it gave up.
+     */
+    @Test
+    void singleNodeClusterAnswersEachWriteOnce() {
+        SimKvCluster cluster = new SimKvCluster(1, 1).startAll();
+        KvClient client = cluster.newClient(KvClient.Options.defaults());
+        for (int i = 0; i < 5; i++) {
+            int n = i;
+            ok(cluster.<Void>await(done -> client.put(b("k" + n), b("v"), done), WAIT));
+        }
+        // No-op + 5 writes, each committed exactly once: nothing timed out and was retried.
+        assertEquals(6, cluster.raft(1).status().commitIndex());
+    }
+
     @Test
     void oversizedKeysAndValuesAreDefinitelyRejected() {
         SimKvCluster cluster = new SimKvCluster(3, 1).startAll();

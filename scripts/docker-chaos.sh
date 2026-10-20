@@ -6,6 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 seconds="${1:-60}"
 
+# Snapshot every 200 entries (production default: 10,000) so the run exercises snapshots,
+# compaction and InstallSnapshot.
+export SNAPSHOT_THRESHOLD="${SNAPSHOT_THRESHOLD:-200}"
 docker compose -p raftkv down -v --remove-orphans >/dev/null 2>&1 || true
 docker compose -p raftkv up -d
 echo "== waiting for all 5 containers to be healthy"

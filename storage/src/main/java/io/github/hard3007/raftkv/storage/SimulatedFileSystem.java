@@ -37,6 +37,7 @@ public final class SimulatedFileSystem implements FileSystem {
     /** Mutating operations left before the scheduled crash; negative means none scheduled. */
     private long operationsUntilCrash = -1;
     private boolean crashed;
+    private long mutations;
 
     public SimulatedFileSystem(Random random) {
         this.random = random;
@@ -102,8 +103,19 @@ public final class SimulatedFileSystem implements FileSystem {
         }
     }
 
+    /** True once a scheduled crash ({@link #crashAfter}) has fired, until the next simulated crash. */
+    public boolean hasCrashed() {
+        return crashed;
+    }
+
+    /** Mutating operations (writes, truncates, fsyncs, creates, deletes, renames) so far. */
+    public long mutations() {
+        return mutations;
+    }
+
     private void beforeMutation() {
         checkNotCrashed();
+        mutations++;
         if (operationsUntilCrash == 0) {
             crashed = true;
             throw new SimulatedCrashException();

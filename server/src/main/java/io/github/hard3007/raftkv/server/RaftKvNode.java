@@ -38,7 +38,7 @@ public final class RaftKvNode implements AutoCloseable {
     private final NodeConfig config;
     private final ExecutorScheduler executor;
     private final GrpcRaftTransport transport;
-    private final BTree tree;
+    private final KvStateMachine stateMachine;
     private final RaftNode raft;
     private final Server grpcServer;
     private final StatusServer statusServer;
@@ -51,8 +51,8 @@ public final class RaftKvNode implements AutoCloseable {
 
         FileSystem disk = new DiskFileSystem(config.dataDirectory());
         RaftStorage storage = RaftStorage.open(disk, "raft.wal");
-        this.tree = BTree.open(disk, "kv", new BTree.Options(2048, FsyncPolicy.LAZY, 16L << 20));
-        KvStateMachine stateMachine = new KvStateMachine(tree, SYNC_EVERY_ENTRIES);
+        this.stateMachine = KvStateMachine.open(disk, "kv", new BTree.Options(2048, FsyncPolicy.LAZY, 16L << 20),
+                SYNC_EVERY_ENTRIES);
 
         List<Integer> peers = new ArrayList<>(config.cluster().keySet());
         peers.remove(Integer.valueOf(config.id()));
@@ -123,7 +123,7 @@ public final class RaftKvNode implements AutoCloseable {
         try {
             executor.call(() -> {
                 raft.stop();
-                tree.close();
+                stateMachine.close();
                 return null;
             }, 10_000);
         } catch (Exception e) {

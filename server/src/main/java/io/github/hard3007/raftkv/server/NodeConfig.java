@@ -31,7 +31,7 @@ public record NodeConfig(int id, Map<Integer, String> cluster, int grpcPort, int
      * <pre>
      *   NODE_ID=1
      *   CLUSTER=1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000
-     *   GRPC_PORT=7000  STATUS_PORT=8080  DATA_DIR=/data
+     *   GRPC_PORT=7000  STATUS_PORT=8080  DATA_DIR=/data  SNAPSHOT_THRESHOLD=10000
      * </pre>
      */
     public static NodeConfig fromEnvironment(Map<String, String> env) {
@@ -45,7 +45,8 @@ public record NodeConfig(int id, Map<Integer, String> cluster, int grpcPort, int
                 Integer.parseInt(env.getOrDefault("GRPC_PORT", "7000")),
                 Integer.parseInt(env.getOrDefault("STATUS_PORT", "8080")),
                 Path.of(env.getOrDefault("DATA_DIR", "/data")),
-                RaftConfig.defaults(),
+                RaftConfig.defaults()
+                        .withSnapshotThreshold(Long.parseLong(env.getOrDefault("SNAPSHOT_THRESHOLD", "10000"))),
                 Long.parseLong(env.getOrDefault("RPC_TIMEOUT_MS", "500")));
     }
 

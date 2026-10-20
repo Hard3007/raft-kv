@@ -5,6 +5,8 @@ import io.github.hard3007.raftkv.common.Scheduler;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesReply;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesRequest;
 import io.github.hard3007.raftkv.proto.raft.EntryType;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotReply;
+import io.github.hard3007.raftkv.proto.raft.InstallSnapshotRequest;
 import io.github.hard3007.raftkv.proto.raft.LogEntry;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteReply;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
@@ -51,7 +53,7 @@ public final class RaftNode implements RaftRpcHandler {
 
     /** A snapshot of the node's state, for tests and the /status endpoint. */
     public record Status(int id, Role role, long term, int leaderId, long commitIndex, long lastApplied,
-            long lastLogIndex) {
+            long lastLogIndex, long snapshotIndex, long snapshotsTaken, long snapshotsInstalled) {
     }
 
     /** Where a proposed command was placed in the leader's log. */
@@ -127,15 +129,43 @@ public final class RaftNode implements RaftRpcHandler {
         this.random = random;
         this.currentTerm = storage.currentTerm();
         this.votedFor = storage.votedFor();
-        this.log = new RaftLog(storage.recoveredEntries());
-        if (appliedIndex > log.lastIndex()) {
+        this.log = new RaftLog(storage.snapshotIndex(), storage.snapshotTerm(), storage.recoveredEntries());
+        long applied = appliedIndex;
+
+        // Restart (thesis §5.1): start from the snapshot, then replay only entries after it.
+        Optional<SnapshotStore.Snapshot> snapshot = storage.snapshots().latest();
+        if (snapshot.isPresent()) {
+            SnapshotStore.Snapshot s = snapshot.get();
+            if (s.index() > log.snapshotIndex()) {
+                // We crashed after saving a snapshot but before compacting the log; finish the job
+                // with Figure 13's rules 6-7.
+                if (log.hasEntry(s.index(), s.term())) {
+                    log.compactThrough(s.index());
+                } else {
+                    log.resetTo(s.index(), s.term());
+                }
+                storage.rewrite(log.snapshotIndex(), log.snapshotTerm(), currentTerm, votedFor,
+                        log.entriesAfterSnapshot());
+            }
+            if (applied < s.index()) {
+                stateMachine.restoreSnapshot(s.data(), s.index()); // the state machine is behind the snapshot
+                applied = s.index();
+            }
+        }
+        if (applied < log.snapshotIndex()) {
+            // The log dropped entries that neither the state machine nor any snapshot covers: the
+            // ordering "snapshot durable before the log prefix is discarded" was broken.
+            throw new IllegalStateException("log compacted through " + log.snapshotIndex()
+                    + " but the state only covers " + applied + ": committed entries are lost");
+        }
+        if (applied > log.lastIndex()) {
             // Impossible if entries are persisted before they are applied (see handleAppendEntries).
-            throw new IllegalStateException("state machine applied index " + appliedIndex
+            throw new IllegalStateException("state machine applied index " + applied
                     + " is ahead of the durable Raft log (last index " + log.lastIndex() + ")");
         }
         // Everything the state machine applied was committed, so both indices can start there.
-        this.commitIndex = appliedIndex;
-        this.lastApplied = appliedIndex;
+        this.commitIndex = applied;
+        this.lastApplied = applied;
     }
 
     /** Runs on the node thread whenever this node stops being leader (to fail pending requests). Call before {@link #start()}. */
@@ -170,7 +200,17 @@ public final class RaftNode implements RaftRpcHandler {
         }
         LogEntry entry = appendToOwnLog(EntryType.COMMAND, ByteString.copyFrom(command));
         sendAppendEntriesToAll();
-        advanceCommitIndex(); // a single-node cluster commits immediately
+        if (peers.isEmpty()) {
+            // A single-node cluster is its own majority. Commit (and apply) on the next task, never
+            // inside propose(): the caller must be able to record the proposal before its entry
+            // is applied, or it would miss its own reply.
+            scheduler.schedule(0, () -> {
+                scheduler.checkThread();
+                if (role == Role.LEADER) {
+                    advanceCommitIndex();
+                }
+            });
+        }
         return Optional.of(new Proposal(entry.getIndex(), entry.getTerm()));
     }
 
@@ -405,19 +445,30 @@ public final class RaftNode implements RaftRpcHandler {
         // [Fig2 Follower-2] Hearing from the current leader resets the election timer.
         resetElectionTimer();
 
+        // Our log may start after a snapshot. Everything up to the snapshot point is committed, so
+        // it matches the leader's log: skip that part of the request and check from there.
+        long prevIndex = request.getPrevLogIndex();
+        long prevTerm = request.getPrevLogTerm();
+        List<LogEntry> entries = request.getEntriesList();
+        if (prevIndex < log.snapshotIndex()) {
+            long covered = log.snapshotIndex();
+            entries = entries.stream().filter(entry -> entry.getIndex() > covered).toList();
+            prevIndex = covered;
+            prevTerm = log.snapshotTerm();
+        }
+
         // [Fig2 AppendEntries-2] Reply false if log doesn't contain an entry at prevLogIndex whose
         // term matches prevLogTerm. Beyond Figure 2 (fast backtracking, end of §5.3): tell the
         // leader where to retry so it can skip a whole conflicting term per round trip.
-        long prevIndex = request.getPrevLogIndex();
         if (prevIndex > log.lastIndex()) {
             return appendReply(false, 0, log.lastIndex() + 1); // our log is too short
         }
-        if (log.termAt(prevIndex) != request.getPrevLogTerm()) {
+        if (log.termAt(prevIndex) != prevTerm) {
             long conflictTerm = log.termAt(prevIndex);
             return appendReply(false, conflictTerm, log.firstIndexOfTerm(conflictTerm, prevIndex));
         }
 
-        for (LogEntry entry : request.getEntriesList()) {
+        for (LogEntry entry : entries) {
             if (entry.getIndex() <= log.lastIndex()) {
                 if (log.termAt(entry.getIndex()) == entry.getTerm()) {
                     continue; // already have it; a delayed duplicate must not truncate anything
@@ -647,6 +698,7 @@ public final class RaftNode implements RaftRpcHandler {
         }
         role = Role.FOLLOWER;
         preVoting = false;
+        transfers.clear();
         if (wasLeader) {
             failPendingReads();
             onLeadershipLost.run();
@@ -699,6 +751,11 @@ public final class RaftNode implements RaftRpcHandler {
      */
     private void sendAppendEntries(int peer) {
         long next = nextIndex.get(peer);
+        if (next <= log.snapshotIndex()) {
+            sendSnapshot(peer); // the entries this follower needs were compacted away
+            return;
+        }
+        transfers.remove(peer);
         long prevIndex = next - 1;
         long lastToSend = Math.min(log.lastIndex(), prevIndex + config.maxEntriesPerAppend());
         AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
@@ -800,6 +857,188 @@ public final class RaftNode implements RaftRpcHandler {
         }
     }
 
+    // ================================================================== snapshots: sending (leader)
+
+    /** An InstallSnapshot transfer to one follower: one chunk in flight at a time. */
+    private static final class SnapshotTransfer {
+        final byte[] file;
+        final long index;
+        final long term;
+        int offset;
+        long sentAtMillis;
+
+        SnapshotTransfer(byte[] file, long index, long term) {
+            this.file = file;
+            this.index = index;
+            this.term = term;
+        }
+    }
+
+    private final Map<Integer, SnapshotTransfer> transfers = new HashMap<>();
+
+    /**
+     * [Fig13 Leader] Sends the latest snapshot in chunks of {@link RaftConfig#snapshotChunkBytes()}.
+     * Only one chunk is in flight. Heartbeats call this too: if the chunk's reply has not come
+     * within two heartbeats, the same chunk is sent again (writing it twice is harmless).
+     */
+    private void sendSnapshot(int peer) {
+        SnapshotTransfer transfer = transfers.get(peer);
+        if (transfer == null) {
+            SnapshotStore.Snapshot latest = storage.snapshots().latest().orElseThrow();
+            transfer = new SnapshotTransfer(storage.snapshots().latestFileBytes(), latest.index(), latest.term());
+            transfers.put(peer, transfer);
+        } else if (scheduler.nowMillis() - transfer.sentAtMillis < 2L * config.heartbeatIntervalMs()) {
+            return; // a chunk is in flight; wait for its reply
+        }
+        sendSnapshotChunk(peer, transfer);
+    }
+
+    private void sendSnapshotChunk(int peer, SnapshotTransfer transfer) {
+        int end = Math.min(transfer.file.length, transfer.offset + config.snapshotChunkBytes());
+        InstallSnapshotRequest request = InstallSnapshotRequest.newBuilder()
+                .setTerm(currentTerm)
+                .setLeaderId(id)
+                .setLastIncludedIndex(transfer.index)
+                .setLastIncludedTerm(transfer.term)
+                .setOffset(transfer.offset)
+                .setData(ByteString.copyFrom(transfer.file, transfer.offset, end - transfer.offset))
+                .setDone(end == transfer.file.length)
+                .build();
+        transfer.sentAtMillis = scheduler.nowMillis();
+        transport.installSnapshot(peer, request, reply -> onInstallSnapshotReply(peer, request, reply));
+    }
+
+    private void onInstallSnapshotReply(int peer, InstallSnapshotRequest request, InstallSnapshotReply reply) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
+        if (reply.getTerm() > currentTerm) {
+            stepDown(reply.getTerm());
+            persistTermAndVote();
+            return;
+        }
+        if (role != Role.LEADER || request.getTerm() != currentTerm) {
+            return;
+        }
+        lastHeardFromMillis.put(peer, scheduler.nowMillis()); // CheckQuorum: this peer is reachable
+        SnapshotTransfer transfer = transfers.get(peer);
+        if (transfer == null || transfer.index != request.getLastIncludedIndex()
+                || transfer.offset != request.getOffset()) {
+            return; // a reply to a chunk we already moved past
+        }
+        if (!request.getDone()) {
+            transfer.offset += request.getData().size();
+            sendSnapshotChunk(peer, transfer);
+            return;
+        }
+        // The last chunk was acknowledged. Figure 13's reply carries only the term, so this does
+        // NOT prove the follower installed the snapshot (it may have been damaged in transit).
+        // Move nextIndex past it and let AppendEntries' consistency check establish matchIndex.
+        transfers.remove(peer);
+        nextIndex.put(peer, Math.max(nextIndex.get(peer), transfer.index + 1));
+        sendAppendEntries(peer);
+    }
+
+    // ================================================================== snapshots: receiving (follower)
+
+    /**
+     * [Fig13 InstallSnapshot RPC receiver]
+     * 1. Reply immediately if term &lt; currentTerm.
+     * 2-4. Create the snapshot file at offset 0, write each chunk at its offset, wait for more
+     *      until done.
+     * 5. Save the snapshot file (fsync + rename), replacing any older one.
+     * 6. If an existing log entry has the same index and term as the snapshot's last included
+     *    entry, retain the log entries following it.
+     * 7. Otherwise discard the entire log.
+     * 8. Reset the state machine using the snapshot contents.
+     */
+    @Override
+    public InstallSnapshotReply handleInstallSnapshot(InstallSnapshotRequest request) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        long termBefore = currentTerm;
+        int voteBefore = votedFor;
+        // [Fig2 All-2] If RPC request contains term T > currentTerm: set currentTerm = T, convert to follower.
+        if (request.getTerm() > currentTerm) {
+            stepDown(request.getTerm());
+        }
+        boolean fromCurrentLeader = request.getTerm() == currentTerm; // [Fig13 1] otherwise just reply
+        if (fromCurrentLeader) {
+            if (role != Role.FOLLOWER) {
+                stepDown(currentTerm);
+            }
+            leaderId = request.getLeaderId();
+            lastLeaderContactMillis = scheduler.nowMillis();
+            preVoting = false;
+            resetElectionTimer(); // [Fig2 Follower-2] the leader is alive
+        }
+        // [Fig2 Persist] before replying (and before touching the snapshot).
+        if (currentTerm != termBefore || votedFor != voteBefore) {
+            persistTermAndVote();
+        }
+        if (fromCurrentLeader) {
+            receiveSnapshotChunk(request);
+        }
+        return InstallSnapshotReply.newBuilder().setTerm(currentTerm).build();
+    }
+
+    private void receiveSnapshotChunk(InstallSnapshotRequest request) {
+        long index = request.getLastIncludedIndex();
+        if (index <= commitIndex) {
+            return; // we already have every entry it covers (Figure 13 keeps only newer snapshots)
+        }
+        SnapshotStore store = storage.snapshots();
+        if (request.getOffset() == 0) {
+            store.beginReceiving(index); // [Fig13 2]
+        }
+        if (!store.isReceiving(index) || request.getOffset() != store.receivedBytes()) {
+            return; // a duplicate or out-of-order chunk; the leader resends in order
+        }
+        store.writeChunk(request.getData().toByteArray()); // [Fig13 3]
+        if (!request.getDone()) {
+            return; // [Fig13 4]
+        }
+        store.finishReceiving().ifPresent(this::installSnapshot); // [Fig13 5] fsync, check, rename
+    }
+
+    private void installSnapshot(SnapshotStore.Snapshot snapshot) {
+        if (log.hasEntry(snapshot.index(), snapshot.term())) {
+            log.compactThrough(snapshot.index()); // [Fig13 6] keep what follows it
+        } else {
+            log.resetTo(snapshot.index(), snapshot.term()); // [Fig13 7]
+        }
+        stateMachine.restoreSnapshot(snapshot.data(), snapshot.index()); // [Fig13 8] durable on return
+        storage.rewrite(log.snapshotIndex(), log.snapshotTerm(), currentTerm, votedFor, log.entriesAfterSnapshot());
+        commitIndex = Math.max(commitIndex, snapshot.index());
+        lastApplied = snapshot.index();
+        snapshotsInstalled++;
+        logger.info("node={} event=snapshot_installed index={} term={}", id, snapshot.index(), snapshot.term());
+    }
+
+    // ================================================================== snapshots: taking one
+
+    private long snapshotsTaken;
+    private long snapshotsInstalled;
+
+    /**
+     * Once {@link RaftConfig#snapshotThreshold()} entries have been applied since the last
+     * snapshot, snapshot the state machine and compact the log. The order is the whole point:
+     * 1. the snapshot is saved durably (fsync + rename) first;
+     * 2. only then is the log prefix it covers dropped, in memory and in the WAL (rewrite).
+     * A crash between the two leaves an uncompacted log next to the snapshot; restart finishes
+     * the job (see the constructor). The other order could lose committed entries.
+     */
+    private void maybeTakeSnapshot() {
+        if (config.snapshotThreshold() == 0 || lastApplied - log.snapshotIndex() < config.snapshotThreshold()) {
+            return;
+        }
+        long index = lastApplied;
+        long term = log.termAt(index);
+        storage.snapshots().save(index, term, stateMachine.takeSnapshot());
+        log.compactThrough(index);
+        storage.rewrite(log.snapshotIndex(), log.snapshotTerm(), currentTerm, votedFor, log.entriesAfterSnapshot());
+        snapshotsTaken++;
+        logger.debug("node={} event=snapshot_taken index={} term={}", id, index, term);
+    }
+
     // ================================================================== applying
 
     /**
@@ -811,6 +1050,7 @@ public final class RaftNode implements RaftRpcHandler {
             lastApplied++;
             stateMachine.apply(log.get(lastApplied));
         }
+        maybeTakeSnapshot();
         if (role == Role.LEADER) {
             startReadsWaitingForNoop();
             serveReadsIfPossible();
@@ -840,7 +1080,8 @@ public final class RaftNode implements RaftRpcHandler {
 
     public Status status() {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
-        return new Status(id, role, currentTerm, leaderId, commitIndex, lastApplied, log.lastIndex());
+        return new Status(id, role, currentTerm, leaderId, commitIndex, lastApplied, log.lastIndex(),
+                log.snapshotIndex(), snapshotsTaken, snapshotsInstalled);
     }
 
     /** Test support: the log entry at {@code index}. */

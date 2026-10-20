@@ -43,7 +43,8 @@ final class StatusServer implements AutoCloseable {
     static String toJson(RaftNode.Status s) {
         return "{\"id\":" + s.id() + ",\"role\":\"" + s.role() + "\",\"term\":" + s.term() + ",\"leaderId\":"
                 + s.leaderId() + ",\"commitIndex\":" + s.commitIndex() + ",\"lastApplied\":" + s.lastApplied()
-                + ",\"lastLogIndex\":" + s.lastLogIndex() + "}";
+                + ",\"lastLogIndex\":" + s.lastLogIndex() + ",\"snapshotIndex\":" + s.snapshotIndex()
+                + ",\"snapshotsTaken\":" + s.snapshotsTaken() + ",\"snapshotsInstalled\":" + s.snapshotsInstalled() + "}";
     }
 
     private static void respond(HttpExchange exchange, int code, String body) throws IOException {
