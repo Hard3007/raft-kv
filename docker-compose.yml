@@ -1,0 +1,55 @@
+# A 5-node raft-kv cluster.
+#   docker compose -p raftkv up -d          # start (build the image first: see scripts/docker-build.sh)
+#   curl localhost:8081/status              # node 1 (nodes 1-5: status 8081-8085, gRPC 7001-7005)
+#   docker compose -p raftkv down           # stop (add -v to delete the data volumes)
+#
+# Each node: 384 MB memory limit (JVM heap 256 MB, see Dockerfile), data on its own named
+# volume (so kill + restart recovers from disk), health check on /status.
+
+x-node: &node
+  image: raft-kv:local
+  mem_limit: 384m
+  restart: unless-stopped
+  stop_grace_period: 10s
+
+x-cluster: &cluster
+  CLUSTER: "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000"
+
+services:
+  node1:
+    <<: *node
+    hostname: node1
+    environment: { <<: *cluster, NODE_ID: "1" }
+    ports: ["7001:7000", "8081:8080"]
+    volumes: ["node1-data:/data"]
+  node2:
+    <<: *node
+    hostname: node2
+    environment: { <<: *cluster, NODE_ID: "2" }
+    ports: ["7002:7000", "8082:8080"]
+    volumes: ["node2-data:/data"]
+  node3:
+    <<: *node
+    hostname: node3
+    environment: { <<: *cluster, NODE_ID: "3" }
+    ports: ["7003:7000", "8083:8080"]
+    volumes: ["node3-data:/data"]
+  node4:
+    <<: *node
+    hostname: node4
+    environment: { <<: *cluster, NODE_ID: "4" }
+    ports: ["7004:7000", "8084:8080"]
+    volumes: ["node4-data:/data"]
+  node5:
+    <<: *node
+    hostname: node5
+    environment: { <<: *cluster, NODE_ID: "5" }
+    ports: ["7005:7000", "8085:8080"]
+    volumes: ["node5-data:/data"]
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:

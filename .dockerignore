@@ -1,0 +1,12 @@
+.git
+.gradle
+**/build
+buildSrc/.gradle
+buildSrc/.kotlin
+.kotlin
+reports
+data
+*.log
+.idea
+.vscode
+.devcontainer

@@ -77,7 +77,7 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - [x] **2. Raft core on the simulated network** — election, replication, persistence. All lab-style tests pass with
   50 seeds (1,121 runs; a 500-seed sweep of 11,021 runs also passed). Mutations M1–M4 are all caught (DESIGN.md §2.5).
 - [x] **3. KV state machine** — sessions, ReadIndex reads, client library, UNKNOWN outcomes. KV tests pass at 500 seeds
-  (3,008 runs); the Raft gate still passes at 50 seeds. See DESIGN.md §3 and §5 (known limitations).
+  (3,008 runs); the Raft gate still passes at 50 seeds. See DESIGN.md §3 and §6 (known limitations).
 - [x] **4. Linearizability checker + chaos harness** — checker self-tests and 15,000-history differential test pass;
   500/500 chaos runs LINEARIZABLE (0 INCONCLUSIVE); mutations caught in 34, 296 and 391 of 500 seeds; CI runs 50 seeds.
   See DESIGN.md §4.

@@ -30,3 +30,17 @@ tasks.register<JavaExec>("chaos") {
     // Mutation runs are expected to find violations; they still write their report.
     isIgnoreExitValue = providers.gradleProperty("expectViolations").isPresent
 }
+
+// Chaos against the Docker cluster (start it first; see scripts/docker-chaos.sh).
+tasks.register<JavaExec>("dockerChaos") {
+    group = "verification"
+    description = "Runs a workload against the 5-container cluster while killing, pausing and disconnecting containers."
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass = "io.github.hard3007.raftkv.chaos.DockerChaosMain"
+    workingDir = rootDir
+    maxHeapSize = "512m"
+    args(
+        "--duration", providers.gradleProperty("duration").getOrElse("60"),
+        "--clients", providers.gradleProperty("clients").getOrElse("4"),
+    )
+}

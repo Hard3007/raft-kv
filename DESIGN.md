@@ -326,7 +326,7 @@ reverted.
   only the first copy takes effect, at one point in the log order. Each copy that applies is a
   commit point, and the session rule makes all but the first one no-ops. So there is a single
   linearization point between the client's first send and the reply it finally accepts.
-- **Never evicted.** Session rows are never removed (see §5).
+- **Never evicted.** Session rows are never removed (see §6).
 
 ### 3.3 Write path and the "unknown" outcome
 - **Write path.** `KvService.put/delete` validates, proposes to Raft, and remembers
@@ -555,7 +555,7 @@ not done it, so the published numbers come from the configuration above.
 - CI runs `./gradlew build` (all unit and simulation tests) and `./gradlew chaos -Pruns=50` on
   every push.
 
-## 5. Known limitations
+## 6. Known limitations
 - **No PreVote and no CheckQuorum.**
   - A node that was partitioned away keeps timing out and incrementing its term. When it
     rejoins, its higher term forces the current leader to step down and an election to run,

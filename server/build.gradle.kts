@@ -9,6 +9,7 @@ dependencies {
     implementation(libs.grpc.netty.shaded)
     runtimeOnly(libs.logback.classic)
     testImplementation(project(":linearizability"))
+    testImplementation(project(":chaos")) // the shared real-client workload
 }
 
 application {

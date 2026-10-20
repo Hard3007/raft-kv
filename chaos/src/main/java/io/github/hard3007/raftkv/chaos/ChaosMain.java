@@ -216,7 +216,7 @@ public final class ChaosMain {
         return commit + (dirty.isEmpty() ? "" : " (with uncommitted changes)");
     }
 
-    private static String machine() {
+    static String machine() {
         String cpu = "";
         try {
             cpu = Files.readAllLines(Path.of("/proc/cpuinfo")).stream()

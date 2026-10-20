@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.github.hard3007.raftkv.chaos.BlockingWorkload;
 import io.github.hard3007.raftkv.client.BlockingKvClient;
 import io.github.hard3007.raftkv.client.KvClient;
 import io.github.hard3007.raftkv.client.KvResult;
@@ -130,8 +131,10 @@ class GrpcClusterTest {
         for (int c = 0; c < 4; c++) {
             int clientNumber = c;
             BlockingKvClient client = newClient(1000 + c, options);
+            BlockingWorkload workload = new BlockingWorkload(clientNumber, client, history, new Random(clientNumber), 150,
+                    3, 60);
             Thread thread = new Thread(() -> {
-                runWorkload(clientNumber, client, history, new Random(clientNumber));
+                workload.run();
                 finishedClients.incrementAndGet();
             }, "workload-" + c);
             clientThreads.add(thread);
@@ -187,45 +190,6 @@ class GrpcClusterTest {
         assertTrue(completed > 200, "too little progress: " + completed);
         assertTrue(crashes > 0 && isolations > 0 && connectionDrops > 0, "every fault type should have happened");
         everyIncarnation.forEach(node -> assertEquals(0, node.failedTasks(), "a task on node " + node.id() + " threw"));
-    }
-
-    private static void runWorkload(int client, BlockingKvClient kv, History history, Random random) {
-        try {
-            for (int n = 0; n < 150; n++) {
-                String key = "k" + random.nextInt(3);
-                int choice = random.nextInt(10);
-                if (choice < 5) {
-                    int id = history.invoke(client, Operation.Kind.GET, key, null);
-                    KvResult<Optional<byte[]>> result = kv.get(b(key));
-                    if (result instanceof KvResult.Ok<Optional<byte[]>> ok) {
-                        history.complete(id, new Operation.Result.Read(
-                                ok.value().map(v -> new String(v, StandardCharsets.UTF_8)).orElse(null)));
-                    } else {
-                        history.discard(id);
-                    }
-                } else if (choice < 9) {
-                    String value = "c" + client + "-" + n;
-                    int id = history.invoke(client, Operation.Kind.PUT, key, value);
-                    endWrite(history, id, kv.put(b(key), b(value)), new Operation.Result.Written());
-                } else {
-                    int id = history.invoke(client, Operation.Kind.DELETE, key, null);
-                    KvResult<Boolean> result = kv.delete(b(key));
-                    endWrite(history, id, result,
-                            result instanceof KvResult.Ok<Boolean> ok ? new Operation.Result.Deleted(ok.value()) : null);
-                }
-                Thread.sleep(random.nextInt(60)); // think time: spreads the workload over the chaos window
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-    }
-
-    private static void endWrite(History history, int id, KvResult<?> result, Operation.Result observed) {
-        if (result instanceof KvResult.Ok<?>) {
-            history.complete(id, observed);
-        } else {
-            history.leavePending(id);
-        }
     }
 
     private int down() {
