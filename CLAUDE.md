@@ -78,8 +78,9 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   50 seeds (1,121 runs; a 500-seed sweep of 11,021 runs also passed). Mutations M1–M4 are all caught (DESIGN.md §2.5).
 - [x] **3. KV state machine** — sessions, ReadIndex reads, client library, UNKNOWN outcomes. KV tests pass at 500 seeds
   (3,008 runs); the Raft gate still passes at 50 seeds. See DESIGN.md §3 and §5 (known limitations).
-- [ ] **4. Linearizability checker + chaos harness** — checker self-tests (incl. pending ops), 500 chaos runs,
-  deliberately break the system (e.g., follower reads), show it is caught, then revert. Add 50-seed chaos to CI.
+- [x] **4. Linearizability checker + chaos harness** — checker self-tests and 15,000-history differential test pass;
+  500/500 chaos runs LINEARIZABLE (0 INCONCLUSIVE); mutations caught in 34, 296 and 391 of 500 seeds; CI runs 50 seeds.
+  See DESIGN.md §4.
 - [ ] **5. gRPC transport** — GATE: before any Docker work, an in-process integration test runs 5 nodes with real
   threads (one executor per node) and the real gRPC transport, and passes. Then the Docker 5-node cluster and Docker-level chaos.
 - [ ] **6. Snapshots + log compaction** (InstallSnapshot, session table included). Rerun the full chaos suite.
@@ -89,20 +90,17 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
-- Done: Phases 0–3.
-- Next: Phase 4 (linearizability checker + chaos harness). Waiting for the user to say "continue".
-- Phase 4 plan (decided now):
-  - Checker: Wing-Gong-Lowe search per key, memoization, timeout. Operations whose client got
-    `KvResult.Unknown` (or no reply) are recorded as **pending with no return time** (decision 11),
-    with a self-test for that case. History timestamps come from the simulation's virtual clock.
-  - Chaos harness drives `SimKvCluster` (kv test fixtures) with several concurrent `KvClient`s.
-  - **Planned mutations; the checker must catch both** (then revert):
-    1. Serve reads without ReadIndex confirmation (`RaftNode.readIndex` calls `onReady()` at once,
-       or followers serve reads locally). Needs partitions that create deposed-but-unaware leaders.
-    2. No session dedup (`KvStateMachine` applies every copy of a write). Only observable when a
-       retried old write lands *after* a newer write to the same key, so the workload needs lost
-       replies / timeouts (retries) and several clients writing the same small key set.
-  - Show each mutation failing with a reproducible seed, and record the seeds in DESIGN.md.
+- Done: Phases 0–4.
+- Next: Phase 5 (gRPC transport, Docker 5-node cluster, Docker-level chaos). Waiting for the user to say "continue".
+- Phase 5 reminders:
+  - GATE first: an in-process test with 5 nodes, real threads (one single-threaded executor per node) and the
+    real gRPC transport. All gRPC callbacks and timers are posted onto the node's executor (decision 2).
+  - `KvClient` is single-threaded: the gRPC `ClientTransport` must post replies onto the client's executor.
+  - Docker chaos reuses the same checker; histories there use wall-clock time (no event counter), so equal
+    timestamps are treated as concurrent (already supported).
+- Resume number so far: **500 / 500 chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=500`, commit 39e1934,
+  Codespace 2-core AMD EPYC 7763), report `reports/chaos/chaos-baseline-500-seeds.md`. Rerun after Phase 6.
+
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
   All come from the third-party protobuf Gradle plugin 0.10.0 (`ProtobufPlugin.groovy`, `ToolsLocator.groovy`),
@@ -141,8 +139,22 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - Never report a definite failure for a write that might commit: only NOT_LEADER (not proposed) and
   INVALID_ARGUMENT are definite.
 
+## Linearizability + chaos module map (Phase 4)
+- `linearizability`: `Operation` (kind, key, times, `Result`: Read/Written/Deleted/Pending), `History` (recorder;
+  times = clock ms * 1e6 + event counter), `KvModel`, `LinearizabilityChecker` (WGL per key, memo, timeout,
+  three `Verdict`s), `Witness` (earliest failing cut, for debugging). Test-only: `BruteForceChecker`,
+  `DifferentialCheckerTest` (15,000 histories).
+- `chaos`: `ChaosRun` (one seed: workload + nemesis + check), `ChaosConfig`, `ChaosMain` (parallel seeds, Markdown +
+  CSV report in `reports/chaos/`, exit 1 unless all LINEARIZABLE). Mutations: `scripts/chaos-mutation.sh`.
+- History rules: invoke just before send, return on accept; Unknown writes pending forever; reads without an
+  answer are left out.
+- Never raise the checker timeout to hide an INCONCLUSIVE run: tell the user and shrink the history instead.
+
 ## Commands
 - Build + all tests: `./gradlew build`
 - One module's tests: `./gradlew :storage:test`
 - Raft tests with N seeds each: `./gradlew :raft:test -PraftSeeds=50`
 - KV tests with N seeds each: `./gradlew :kv:test -PkvSeeds=50`
+- Chaos suite: `./gradlew chaos -Pruns=500` (report in `reports/chaos/`); replay one seed:
+  `./gradlew chaos -Pruns=1 -PstartSeed=<seed> -Pverbose` (prints the fault log and, if it failed, the witness)
+- Mutation runs: `scripts/chaos-mutation.sh <reads-without-readindex|no-session-dedup|follower-reads> 500`

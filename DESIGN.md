@@ -406,9 +406,154 @@ timeout answers `UNKNOWN`.
   apply on every apply.
 - **Sweep results.** All KV tests pass at 500 seeds (3,008 runs).
 
-## 4. Testing summary
-See §1.6 (storage), §2.3–2.5 (Raft), and §3 (KV). Phase 4 adds the linearizability checker
-and the chaos harness.
+## 4. Linearizability checking and chaos testing (`linearizability/`, `chaos/`)
+
+### 4.1 The checker (`LinearizabilityChecker`)
+- **Algorithm.** Wing-Gong-Lowe search with Lowe's memoization, as in the Porcupine checker.
+  - Call and return events of one key go into a doubly linked list in time order.
+  - At a call, the search tries to linearize that operation now. If the model accepts the
+    observed result, the operation's call and return are unlinked, the choice is pushed, and
+    the search restarts at the front.
+  - At a return, an already-returned operation was not placed in time, so the last choice is
+    undone.
+  - An empty list means linearizable. Hitting a return with nothing to undo means not
+    linearizable.
+  - Memoization: configurations of (set of linearized operations, model state) are recorded,
+    and repeats are skipped.
+- **Per key.** Linearizability is compositional (Herlihy and Wing), and every operation touches
+  one key. So each key's sub-history is checked on its own, which shrinks the search
+  exponentially.
+- **Three verdicts, never two.** `LINEARIZABLE`, `NOT_LINEARIZABLE`, and `INCONCLUSIVE` (the
+  wall-clock budget ran out). INCONCLUSIVE never counts as a pass. The chaos report counts it
+  separately, and the chaos task fails the build on it.
+- **Pending writes** (unknown outcome) have return time = ∞, and their results are not checked.
+  - With return = ∞, they never force a backtrack, so they may take effect at any point after
+    invocation.
+  - Placing one at the very end is the same as "never took effect".
+  - They still take effect at most once. The self-test `pendingWriteTakesEffectAtMostOnce`
+    shows the checker rejects a history that needs a pending write twice.
+- **Equal timestamps count as concurrent** (calls sort before returns). That can only permit
+  more orderings, never invent a violation.
+- **Witness** (`Witness.earliestViolation`). For a failing history, a binary search finds the
+  earliest moment T at which the history *as it looked at T* was already broken.
+  - At the cut, still-running writes become pending and still-running reads are dropped.
+  - Cutting is sound: if the full history is linearizable, every cut is too.
+  - The last operations before T tell the story (examples in §4.5).
+
+### 4.2 Validating the checker itself
+- **Hand-written histories (15 tests).** Basics, stale reads, reads that go backwards, delete
+  `existed` flags, ties, per-key reporting, each pending-write rule, and a search that must time
+  out (24 concurrent puts plus an impossible read) and return INCONCLUSIVE. Each history is
+  checked by both checkers.
+- **Differential testing (`DifferentialCheckerTest`).** A brute-force checker
+  (`BruteForceChecker`, test code) tries every ordering that respects real time, over the
+  *whole* multi-key history. It shares no logic with the real checker: no per-key split, no
+  event list, no memo. Both run on 15,000 random histories (up to 8 operations, 1–2 keys, ties,
+  pending writes) from three generators, and must agree on every one:
+
+  | Generator | Linearizable | Not |
+  |---|---|---|
+  | valid by construction (ops run sequentially at random points inside their intervals) | 5,000 | 0 |
+  | one result corrupted | 3,398 | 1,602 |
+  | random results | 1,357 | 3,643 |
+  | **total** | **9,755** | **5,245** |
+
+- **The differential test has teeth.** Each of these breaks of the real checker made it fail:
+  - sorting returns before calls on ties;
+  - backtracking only one level;
+  - ignoring pending writes.
+
+### 4.3 History rules (`History`, `ChaosRun`)
+- **Invoke** is recorded just before the client sends; **return** when the client accepts the
+  reply. Both use the simulation clock.
+  - Each timestamp is `virtual ms × 10⁶ + event counter`.
+  - The simulation is single-threaded, so this is the exact real-time order, even within one
+    millisecond.
+- **Writes** whose result is `Unknown` stay **pending forever**.
+- **Reads** without a definite answer (`Unknown`; the client never surfaces `NOT_LEADER`) are
+  **left out**, since reads have no side effects.
+- **Unique values.** Every put writes a unique value (`c<client>-<n>`), so each read names the
+  write it observed.
+
+### 4.4 The chaos harness
+- **One run (`ChaosRun`, one seed):** a 5-node `SimKvCluster`, with 5 concurrent clients doing
+  60 random operations each (50% get, 40% put, 10% delete) on **3 shared keys**. Think time is
+  0–300 ms. Client attempts time out after 1 s, and clients give up (Unknown) after 4 s.
+- **Nemesis.** A random fault action every 100–400 ms of virtual time:
+  - crash a node (power loss; at most two down at once);
+  - restart a crashed node;
+  - isolate the leader;
+  - split off a random minority of 1–2 nodes;
+  - heal partitions;
+  - toggle 10% message loss;
+  - toggle long delays (about 1 in 10 messages delayed 0.2–2 s, which makes clients retry while
+    old copies of their requests are still in flight).
+
+  Each partition puts every client on a random side, so clients get stuck with deposed leaders
+  too. At the end everything is healed and restarted.
+- **Determinism.** Same seed, same run, byte for byte. Runs execute two at a time in parallel,
+  and the counts reproduce exactly. For example, seed 17 of the ReadIndex mutation fails the same
+  way alone and in the 500-seed batch.
+- **Reports.** `./gradlew chaos -Pruns=N` writes `reports/chaos/chaos-<label>-<N>-seeds.md`
+  (command, commit, machine, config, verdict counts, per-seed min/mean/max of operations and
+  every fault type, wall time) plus a per-seed `.csv`. It exits non-zero unless every run is
+  LINEARIZABLE. `-Pruns=1 -PstartSeed=S -Pverbose` replays one seed with its fault log and
+  witness.
+
+### 4.5 Results
+**Baseline:** `reports/chaos/chaos-baseline-500-seeds.md`, commit `39e1934`.
+- **500 / 500 LINEARIZABLE**, 0 NOT_LINEARIZABLE, 0 INCONCLUSIVE, 14.6 s wall time on the
+  2-core Codespace.
+- Per seed: 300 operations; 14–49 crashes (mean 27.5); 37–144 partitions (mean 82.9); 10–37
+  message-loss periods; 156–774 messages lost; 10–40 long-delay periods; 45–125 s of virtual
+  time.
+
+**Mutations** (`scripts/chaos-mutation.sh <name> 500`; each report includes the exact diff):
+
+| Mutation | Seeds caught (NOT_LINEARIZABLE) | INCONCLUSIVE |
+|---|---|---|
+| Reads served without the ReadIndex confirmation round | **34 / 500** (6.8%) | 0 |
+| No session dedup (every copy of a write applies) | **296 / 500** (59.2%) | 0 |
+| Followers serve reads from their own state machine | **391 / 500** (78.2%) | 0 |
+
+**Example witnesses** (`-Pverbose` replays; times are `ms#event`):
+- **Reads without confirmation, seed 17.** A delete of `k0` returns `existed=true` at
+  13769ms. A get invoked at 13788ms, after that delete returned, still reads the deleted value
+  `c3-6`. A leader that had been deposed answered from its stale state.
+- **No dedup, seed 2.** A client reads `c3-30` from `k1`, then deletes `k1` and is told
+  `existed=false`. Its delete was applied twice: the first copy removed the value, and the
+  retry was re-executed instead of answered from the session cache.
+
+**Why the ReadIndex mutation is caught least often.** It takes four things at once:
+1. the leader is isolated *with* a client on its side (each client has a 1/3 chance);
+2. the majority side completes a write to the same key;
+3. that stranded client then reads that key;
+4. all of this happens before the next fault action reshapes the partition, 100–400 ms later.
+
+Follower reads are caught far more often, because any lagging follower can serve a stale value
+at any time. All three bugs are caught many times in 500 seeds. Higher sensitivity for the
+ReadIndex case would need longer-lived leader isolations. That is a possible tuning, but we have
+not done it, so the published numbers come from the configuration above.
+
+### 4.6 Bugs the chaos harness found
+- **`KvClient` completed an operation twice.**
+  - The sequence: an attempt timed out *after* the overall deadline, so the client finished the
+    operation as Unknown, without retiring that attempt's number. The attempt's late reply then
+    completed the operation a second time.
+  - The fix: `finish()` retires the current attempt.
+  - Regression test: `KvClientTest.aLateReplyAfterGivingUpDoesNotCompleteTheOperationTwice`. It
+    fails without the fix (2 completions instead of 1).
+- **The first fault schedule was too weak.** With faults every 200–1000 ms and little think
+  time, runs ended in about 12 s of virtual time, and some seeds saw zero crashes or partitions.
+  The schedule was densified until every seed sees at least 14 crashes and 37 partitions.
+
+### 4.7 Testing summary
+- Storage: §1.6.
+- Raft: §2.3–2.5.
+- KV: §3.
+- Checker: §4.2. Chaos: §4.5.
+- CI runs `./gradlew build` (all unit and simulation tests) and `./gradlew chaos -Pruns=50` on
+  every push.
 
 ## 5. Known limitations
 - **No PreVote and no CheckQuorum.**
@@ -434,5 +579,5 @@ and the chaos harness.
 - **Deletes don't reclaim B-Tree space** (§1.3).
 
 ## To be written
-- The linearizability checker and chaos testing (Phase 4), the gRPC transport and production
-  threading model (Phase 5), snapshots (Phase 6), and performance (Phase 7).
+- The gRPC transport and production threading model (Phase 5), snapshots (Phase 6), and
+  performance (Phase 7).

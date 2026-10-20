@@ -51,3 +51,17 @@ diff "$backup" "$file" || true
 
 ./gradlew chaos -Pruns="$runs" -Plabel="mutation-$mutation" -PexpectViolations --console=plain \
   | grep -E "^chaos:|LINEARIZABLE=|runs done$" || true
+
+# Make the report self-describing: the "uncommitted changes" in its header are exactly this diff.
+report="reports/chaos/chaos-mutation-$mutation-$runs-seeds.md"
+{
+  echo
+  echo "## Mutation applied"
+  echo
+  echo "This run used a deliberately broken build (\`scripts/chaos-mutation.sh $mutation $runs\`)."
+  echo "Change to \`$file\`:"
+  echo
+  echo '```diff'
+  diff -u "$backup" "$file" | tail -n +3 || true
+  echo '```'
+} >> "$report"
