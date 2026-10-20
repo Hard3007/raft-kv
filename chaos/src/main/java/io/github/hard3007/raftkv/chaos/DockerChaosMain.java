@@ -71,7 +71,11 @@ public final class DockerChaosMain {
         int seconds = Integer.parseInt(options.getOrDefault("duration", "60"));
         int clients = Integer.parseInt(options.getOrDefault("clients", "4"));
         String project = options.getOrDefault("project", "raftkv");
-        Path report = Path.of(options.getOrDefault("report", "reports/chaos/docker-chaos-" + seconds + "s.md"));
+        Path report = Path.of(options.getOrDefault("report",
+                "reports/chaos/docker-chaos-" + seconds + "s-" + ChaosMain.reportStamp() + ".md"));
+        if (Files.exists(report)) {
+            throw new IllegalStateException("refusing to overwrite " + report); // reports are evidence
+        }
         System.exit(new DockerChaosMain(project).run(seconds, clients, report) ? 0 : 1);
     }
 

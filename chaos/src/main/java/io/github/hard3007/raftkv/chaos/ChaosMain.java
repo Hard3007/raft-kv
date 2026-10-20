@@ -44,7 +44,11 @@ public final class ChaosMain {
         long startSeed = Long.parseLong(options.getOrDefault("start-seed", "1"));
         String label = options.getOrDefault("label", "baseline");
         boolean verbose = options.containsKey("verbose");
-        Path report = Path.of(options.getOrDefault("report", "reports/chaos/chaos-" + label + "-" + runs + "-seeds.md"));
+        Path report = Path.of(options.getOrDefault("report",
+                "reports/chaos/chaos-" + label + "-" + runs + "-seeds-" + reportStamp() + ".md"));
+        if (Files.exists(report)) {
+            throw new IllegalStateException("refusing to overwrite " + report); // reports are evidence
+        }
         int threads = Integer.parseInt(options.getOrDefault("threads",
                 Integer.toString(Math.max(1, Runtime.getRuntime().availableProcessors()))));
         ChaosConfig config = ChaosConfig.defaults();
@@ -243,6 +247,15 @@ public final class ChaosMain {
     }
 
     // ------------------------------------------------------------------ environment
+
+    /** commit[-dirty]-yyyyMMddTHHmmssZ, so every report file name is unique and says what code produced it. */
+    static String reportStamp() {
+        String commit = run("git", "rev-parse", "--short", "HEAD");
+        String dirty = run("git", "status", "--porcelain", "--untracked-files=no");
+        return (commit.isEmpty() ? "unknown" : commit) + (dirty.isEmpty() ? "" : "-dirty") + "-"
+                + java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
+                        .format(java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC));
+    }
 
     private static String gitCommit() {
         String commit = run("git", "rev-parse", "--short", "HEAD");

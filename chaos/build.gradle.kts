@@ -40,8 +40,10 @@ tasks.register<JavaExec>("dockerChaos") {
     mainClass = "io.github.hard3007.raftkv.chaos.DockerChaosMain"
     workingDir = rootDir
     maxHeapSize = "512m"
-    args(
+    val dockerArgs = mutableListOf(
         "--duration", providers.gradleProperty("duration").getOrElse("60"),
         "--clients", providers.gradleProperty("clients").getOrElse("4"),
     )
+    providers.gradleProperty("report").orNull?.let { dockerArgs.addAll(listOf("--report", it)) }
+    args(dockerArgs)
 }
