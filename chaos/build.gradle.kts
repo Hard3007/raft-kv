@@ -24,6 +24,9 @@ tasks.register<JavaExec>("chaos") {
         "--label", providers.gradleProperty("label").getOrElse("baseline"),
         "--check-quorum", providers.gradleProperty("checkQuorum").getOrElse("true"),
     )
+    if (providers.gradleProperty("dockerLike").isPresent) {
+        chaosArgs.add("--docker-like")
+    }
     if (providers.gradleProperty("verbose").isPresent) {
         chaosArgs.add("--verbose")
     }

@@ -124,6 +124,15 @@ public final class SimKvCluster {
 
     /** Power loss: timers and in-flight messages die; the disk keeps only fsynced data. */
     public void crash(int i) {
+        crash(i, true);
+    }
+
+    /**
+     * Crashes a node. With {@code powerLoss}, its disk keeps only fsynced data (lost, torn and
+     * reordered writes); without it, a process crash (like {@code docker kill}): every write the
+     * process made survives in the OS page cache.
+     */
+    public void crash(int i, boolean powerLoss) {
         if (nodes[i] == null) {
             return;
         }
@@ -134,7 +143,11 @@ public final class SimKvCluster {
         network.resume(i); // a crash ends any pause; the restarted process is not frozen
         nodes[i].raft.stop();
         network.unregister(i);
-        disks[i].simulatePowerLoss();
+        if (powerLoss) {
+            disks[i].simulatePowerLoss();
+        } else {
+            disks[i].simulateProcessCrash();
+        }
         nodes[i] = null;
     }
 

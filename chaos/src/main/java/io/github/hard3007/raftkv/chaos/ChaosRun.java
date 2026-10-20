@@ -243,7 +243,7 @@ final class ChaosRun {
             return; // at most two down at a time, so a majority can still make progress
         }
         int victim = alive.get(random.nextInt(alive.size()));
-        cluster.crash(victim);
+        cluster.crash(victim, config.powerLossOnCrash() || random.nextBoolean()); // power loss or a process crash
         armed.remove(victim);
         crashes++;
         log("crash node " + victim);

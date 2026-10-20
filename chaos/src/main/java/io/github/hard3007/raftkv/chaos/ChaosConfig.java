@@ -17,21 +17,29 @@ import java.time.Duration;
  * @param maxFaultGapMs      longest pause between two fault actions
  * @param clientOptions      client timeouts; give-up must be short enough that ops end
  * @param checkerTimeout     wall-clock budget for the linearizability check of one run
+ * @param powerLossOnCrash   every plain crash is a power loss; otherwise half are process crashes
+ *                           (like docker kill: un-fsynced writes survive)
  * @param raft               Raft settings; snapshots are frequent and chunks tiny, so every run
  *                           exercises snapshotting, multi-chunk InstallSnapshot and compaction
  */
 public record ChaosConfig(int nodes, int clients, int keys, int operationsPerClient, int maxThinkMs,
         int minFaultGapMs, int maxFaultGapMs, KvClient.Options clientOptions, Duration checkerTimeout,
-        RaftConfig raft) {
+        boolean powerLossOnCrash, RaftConfig raft) {
 
     public static ChaosConfig defaults() {
         return new ChaosConfig(5, 5, 3, 60, 300, 100, 400, new KvClient.Options(1000, 50, 4000),
-                Duration.ofSeconds(10), RaftConfig.defaults().withSnapshotThreshold(20).withSnapshotChunkBytes(64));
+                Duration.ofSeconds(10), true, RaftConfig.defaults().withSnapshotThreshold(20).withSnapshotChunkBytes(64));
+    }
+
+    /** Docker-like settings: process crashes too, 4 clients, a snapshot every 200 entries in one chunk. */
+    public ChaosConfig dockerLike() {
+        return new ChaosConfig(nodes, 4, keys, 1000, 50, minFaultGapMs, maxFaultGapMs, clientOptions, checkerTimeout, false,
+                raft.withSnapshotThreshold(200).withSnapshotChunkBytes(256 * 1024));
     }
 
     public ChaosConfig withRaft(RaftConfig newRaft) {
         return new ChaosConfig(nodes, clients, keys, operationsPerClient, maxThinkMs, minFaultGapMs, maxFaultGapMs,
-                clientOptions, checkerTimeout, newRaft);
+                clientOptions, checkerTimeout, powerLossOnCrash, newRaft);
     }
 
     public String describe() {

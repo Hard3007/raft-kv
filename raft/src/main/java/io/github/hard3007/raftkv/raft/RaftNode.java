@@ -166,6 +166,9 @@ public final class RaftNode implements RaftRpcHandler {
         // Everything the state machine applied was committed, so both indices can start there.
         this.commitIndex = applied;
         this.lastApplied = applied;
+        logger.info("node={} event=recovered term={} voted_for={} log_base={} last_index={} applied={} snapshot={}", id,
+                currentTerm, votedFor, log.snapshotIndex(), log.lastIndex(), applied,
+                snapshot.map(SnapshotStore.Snapshot::index).orElse(0L));
     }
 
     /** Runs on the node thread whenever this node stops being leader (to fail pending requests). Call before {@link #start()}. */
@@ -348,6 +351,9 @@ public final class RaftNode implements RaftRpcHandler {
                 && candidateLogIsUpToDate(request.getLastLogTerm(), request.getLastLogIndex())) {
             votedFor = request.getCandidateId();
             granted = true;
+            logger.info("node={} event=vote_granted candidate={} term={} candidate_last_index={} candidate_last_term={} my_last_index={} my_last_term={} my_commit={}",
+                    id, request.getCandidateId(), currentTerm, request.getLastLogIndex(), request.getLastLogTerm(),
+                    log.lastIndex(), log.lastTerm(), commitIndex);
             // [Fig2 Follower-2] Granting a vote resets the election timer.
             resetElectionTimer();
         }
@@ -475,6 +481,13 @@ public final class RaftNode implements RaftRpcHandler {
                 }
                 // [Fig2 AppendEntries-3] If an existing entry conflicts with a new one (same index
                 // but different terms), delete the existing entry and all that follow it.
+                if (entry.getIndex() <= commitIndex) {
+                    // Committed entries never conflict (Log Matching + Leader Completeness). If one
+                    // does, safety is already lost: stop rather than overwrite committed state.
+                    throw new IllegalStateException("node " + id + " asked to overwrite committed entry "
+                            + entry.getIndex() + " (commitIndex " + commitIndex + ") by leader " + request.getLeaderId()
+                            + " of term " + request.getTerm());
+                }
                 log.truncateFrom(entry.getIndex());
                 truncatedFrom[0] = entry.getIndex();
             }
@@ -628,6 +641,11 @@ public final class RaftNode implements RaftRpcHandler {
     }
 
     private void becomeLeader() {
+        if (log.lastIndex() < commitIndex) {
+            // Leader Completeness, checked locally: our own log must hold everything we know is committed.
+            throw new IllegalStateException("node " + id + " would lead term " + currentTerm + " with last index "
+                    + log.lastIndex() + " below its commit index " + commitIndex);
+        }
         role = Role.LEADER;
         leaderId = id;
         if (electionTimer != null) {
@@ -642,7 +660,8 @@ public final class RaftNode implements RaftRpcHandler {
             lastHeardFromMillis.put(peer, scheduler.nowMillis());
         }
         leaderSinceMillis = scheduler.nowMillis();
-        logger.info("node={} event=became_leader term={} last_log_index={}", id, currentTerm, log.lastIndex());
+        logger.info("node={} event=became_leader term={} last_log_index={} last_log_term={} commit={} votes={}", id, currentTerm,
+                log.lastIndex(), log.lastTerm(), commitIndex, votesGranted);
 
         // Beyond Figure 2 (§5.4.2, §8): commit a no-op from our own term right away. A leader may
         // only commit entries from its current term by counting replicas (Leader-4), so without
@@ -1000,7 +1019,11 @@ public final class RaftNode implements RaftRpcHandler {
     }
 
     private void installSnapshot(SnapshotStore.Snapshot snapshot) {
-        if (log.hasEntry(snapshot.index(), snapshot.term())) {
+        long lastBefore = log.lastIndex();
+        long baseBefore = log.snapshotIndex();
+        long commitBefore = commitIndex;
+        boolean keep = log.hasEntry(snapshot.index(), snapshot.term());
+        if (keep) {
             log.compactThrough(snapshot.index()); // [Fig13 6] keep what follows it
         } else {
             log.resetTo(snapshot.index(), snapshot.term()); // [Fig13 7]
@@ -1010,7 +1033,8 @@ public final class RaftNode implements RaftRpcHandler {
         commitIndex = Math.max(commitIndex, snapshot.index());
         lastApplied = snapshot.index();
         snapshotsInstalled++;
-        logger.info("node={} event=snapshot_installed index={} term={}", id, snapshot.index(), snapshot.term());
+        logger.info("node={} event=snapshot_installed index={} term={} mode={} last_before={} base_before={} commit_before={} last_after={}",
+                id, snapshot.index(), snapshot.term(), keep ? "keep" : "reset", lastBefore, baseBefore, commitBefore, log.lastIndex());
     }
 
     // ================================================================== snapshots: taking one
@@ -1036,7 +1060,7 @@ public final class RaftNode implements RaftRpcHandler {
         log.compactThrough(index);
         storage.rewrite(log.snapshotIndex(), log.snapshotTerm(), currentTerm, votedFor, log.entriesAfterSnapshot());
         snapshotsTaken++;
-        logger.debug("node={} event=snapshot_taken index={} term={}", id, index, term);
+        logger.info("node={} event=snapshot_taken index={} term={} last={}", id, index, term, log.lastIndex());
     }
 
     // ================================================================== applying

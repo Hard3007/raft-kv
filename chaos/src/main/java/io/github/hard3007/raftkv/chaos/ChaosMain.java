@@ -52,6 +52,9 @@ public final class ChaosMain {
         int threads = Integer.parseInt(options.getOrDefault("threads",
                 Integer.toString(Math.max(1, Runtime.getRuntime().availableProcessors()))));
         ChaosConfig config = ChaosConfig.defaults();
+        if (options.containsKey("docker-like")) {
+            config = config.dockerLike(); // process crashes, 4 clients, 200-entry snapshots, one chunk
+        }
         if (options.getOrDefault("check-quorum", "true").equals("false")) {
             // ReadIndex must be safe without CheckQuorum, whose timeouts otherwise shorten the time a
             // deposed leader stays unaware; this variant keeps that dangerous window open.
