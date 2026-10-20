@@ -8,6 +8,7 @@ import io.github.hard3007.raftkv.linearizability.History;
 import io.github.hard3007.raftkv.linearizability.LinearizabilityChecker;
 import io.github.hard3007.raftkv.linearizability.Operation;
 import io.github.hard3007.raftkv.linearizability.Verdict;
+import io.github.hard3007.raftkv.linearizability.Witness;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -144,6 +145,9 @@ public final class DockerChaosMain {
         int discarded = workloads.stream().mapToInt(BlockingWorkload::discardedReads).sum();
         writeReport(report, seconds, clientCount, operations.size() + discarded, completed, pending, discarded, result,
                 wallMillis, checkMillis);
+        if (result.verdict() == Verdict.NOT_LINEARIZABLE) {
+            writeViolation(Path.of(report.toString().replaceAll("\\.md$", "-violation.txt")), result);
+        }
         System.out.printf("final term %d (highest current term across nodes after the run)%n", finalTerm);
         System.out.printf("verdict %s: %d operations (%d completed, %d pending writes, %d reads left out); faults %s;"
                 + " peak memory %s (limit %s); report %s%n", result.verdict(), operations.size() + discarded, completed,
@@ -256,6 +260,23 @@ public final class DockerChaosMain {
     }
 
     // ------------------------------------------------------------------ report
+
+    /** The earliest failing cut of the offending key's history (the short story), then the whole of it. */
+    private static void writeViolation(Path path, CheckResult result) throws IOException {
+        List<Operation> cut = Witness.earliestViolation(result.operations(), Duration.ofSeconds(60));
+        long origin = result.operations().stream().mapToLong(Operation::invokeTime).min().orElse(0);
+        java.util.function.LongFunction<String> time = t -> String.format("%.3fms", (t - origin) / 1e6);
+        StringBuilder text = new StringBuilder("Key " + result.key() + ": earliest moment the history was already broken"
+                + " (last 30 operations of that cut; times are ms since the key's first operation)\n");
+        List<Operation> sorted = cut.stream().sorted(java.util.Comparator.comparingLong(Operation::invokeTime)).toList();
+        sorted.subList(Math.max(0, sorted.size() - 30), sorted.size())
+                .forEach(op -> text.append("  ").append(op.describe(time)).append('\n'));
+        text.append("\nFull history of key ").append(result.key()).append(":\n");
+        result.operations().stream().sorted(java.util.Comparator.comparingLong(Operation::invokeTime))
+                .forEach(op -> text.append("  ").append(op.describe(time)).append('\n'));
+        Files.writeString(path, text.toString(), StandardCharsets.UTF_8);
+        System.out.println("violation witness: " + path);
+    }
 
     private void writeReport(Path path, int seconds, int clientCount, int operations, int completed, int pending,
             int discarded, CheckResult result, long wallMillis, long checkMillis) throws IOException {

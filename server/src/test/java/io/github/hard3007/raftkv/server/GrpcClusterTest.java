@@ -148,10 +148,11 @@ class GrpcClusterTest {
         int crashes = 0;
         int isolations = 0;
         int connectionDrops = 0;
+        int freezes = 0;
         while (finishedClients.get() < clientThreads.size()) {
             Thread.sleep(300 + random.nextInt(400)); // pacing of fault injection, not a correctness wait
             int id = 1 + random.nextInt(NODES);
-            switch (random.nextInt(4)) {
+            switch (random.nextInt(5)) {
                 case 0 -> {
                     if (nodes[id] != null && down() < 2) {
                         nodes[id].crash();
@@ -171,6 +172,12 @@ class GrpcClusterTest {
                         connectionDrops++;
                     }
                 }
+                case 3 -> {
+                    if (nodes[id] != null) {
+                        nodes[id].freezeFor(500 + random.nextInt(1500)); // like a GC pause or docker pause
+                        freezes++;
+                    }
+                }
                 default -> healPartitions();
             }
         }
@@ -188,7 +195,8 @@ class GrpcClusterTest {
         CheckResult result = new LinearizabilityChecker(Duration.ofSeconds(30)).check(operations);
         long completed = operations.stream().filter(op -> !op.isPending()).count();
         System.out.printf("grpc chaos: %d operations (%d completed), %d crashes, %d isolations, %d connection drops,"
-                + " verdict %s%n", operations.size(), completed, crashes, isolations, connectionDrops, result.verdict());
+                + " %d freezes, verdict %s%n", operations.size(), completed, crashes, isolations, connectionDrops, freezes,
+                result.verdict());
         assertEquals(Verdict.LINEARIZABLE, result.verdict(), "key " + result.key() + ": " + result.operations());
         assertTrue(completed > 200, "too little progress: " + completed);
         assertTrue(crashes > 0 && isolations > 0 && connectionDrops > 0, "every fault type should have happened");

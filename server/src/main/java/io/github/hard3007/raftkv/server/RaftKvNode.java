@@ -104,15 +104,30 @@ public final class RaftKvNode implements AutoCloseable {
     }
 
     /**
+     * Test hook: freezes the node's thread for {@code millis}, like a long GC pause. gRPC keeps
+     * accepting requests and replies, which queue up behind the frozen task, and timers fall
+     * behind; when it ends, the node handles the backlog believing what it believed before.
+     */
+    public void freezeFor(long millis) {
+        executor.execute(() -> {
+            try {
+                Thread.sleep(millis); // the simulated pause itself
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    /**
      * Stops the node abruptly, like a killed process: no checkpoint, no clean close of files.
      * Waits until its thread has stopped, so a restart never runs alongside it.
      */
     public void crash() {
         grpcServer.shutdownNow();
+        awaitServer(); // no gRPC handler is still running when the node thread stops
         statusServer.close();
         transport.close();
         executor.close();
-        awaitServer();
     }
 
     /** Graceful stop: the B-Tree is checkpointed so the next start replays nothing. */

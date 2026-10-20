@@ -3,6 +3,7 @@ package io.github.hard3007.raftkv.common;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -49,14 +50,30 @@ public final class ExecutorScheduler implements Scheduler, Executor, AutoCloseab
 
     @Override
     public Cancellable schedule(long delayMillis, Runnable task) {
-        ScheduledFuture<?> future = executor.schedule(guarded(task), delayMillis, TimeUnit.MILLISECONDS);
-        return () -> future.cancel(false);
+        if (closing) {
+            return () -> { }; // a stopped node runs nothing
+        }
+        try {
+            ScheduledFuture<?> future = executor.schedule(guarded(task), delayMillis, TimeUnit.MILLISECONDS);
+            return () -> future.cancel(false);
+        } catch (RejectedExecutionException e) {
+            return () -> { }; // lost a race with close(): the node is stopping
+        }
     }
 
     /** Posts {@code task} to run on this scheduler's thread as soon as possible. */
     @Override
     public void execute(Runnable task) {
-        executor.execute(guarded(task));
+        // After close(), work posted by gRPC threads that were still finishing is dropped, as it
+        // would be in a dead process. (It must not throw on their thread.)
+        if (closing) {
+            return;
+        }
+        try {
+            executor.execute(guarded(task));
+        } catch (RejectedExecutionException e) {
+            // lost a race with close(): the node is stopping
+        }
     }
 
     /** Runs {@code task} on this thread and waits for its result (for callers on other threads). */

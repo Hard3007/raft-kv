@@ -100,10 +100,12 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   - The Figure 8 tests must keep `maxEntriesPerAppend = 1` (DESIGN.md §2.5) when replication changes.
   - Pipelining must never infer matchIndex from anything but a successful AppendEntries (§2.6 rule).
   - Final resume numbers come only from the Oracle VM; Codespaces runs are labeled sanity checks.
+- **OPEN BUG (blocks the Docker claim):** 180 s Docker chaos on 43a3adb was NOT_LINEARIZABLE once (key k1); a rerun
+  passed. No witness was captured. See reports/chaos/docker-chaos-180s-phase6-notes.md. Next: reproduce with
+  the witness + node logs that DockerChaosMain and docker-chaos.sh now save, then explain and fix.
 - Resume numbers so far (Codespace, 2-core AMD EPYC 7763):
-  - **500 / 500 simulated chaos runs LINEARIZABLE** with snapshots, mid-I/O crashes and pauses
-    (`./gradlew chaos -Pruns=500`, commit 61dda62). The 10,000-seed sweep replaces this.
-  - Docker chaos 180 s LINEARIZABLE (commit 3efea60; rerun after Phase 6 pending).
+  - **10,000 / 10,000 simulated chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=10000`, commit 43a3adb).
+  - Docker chaos: LINEARIZABLE on 3efea60 (Phase 5); after Phase 6, one NOT_LINEARIZABLE run is OPEN (above).
 
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).

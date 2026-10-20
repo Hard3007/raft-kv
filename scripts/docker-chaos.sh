@@ -22,6 +22,8 @@ docker compose -p raftkv ps --format 'table {{.Name}}\t{{.Status}}'
 status=0
 ./gradlew dockerChaos -Pduration="$seconds" --console=plain -q || status=$?
 
+# Keep every node's log next to the report (elections, snapshot installs, CheckQuorum step-downs).
+docker compose -p raftkv logs --no-color --timestamps > "reports/chaos/docker-chaos-${seconds}s-node-logs.txt" 2>&1 || true
 echo "== after the run"
 docker compose -p raftkv ps --format 'table {{.Name}}\t{{.Status}}'
 for port in 8081 8082 8083 8084 8085; do curl -fsS "localhost:$port/status" || echo "node on $port not answering"; echo; done

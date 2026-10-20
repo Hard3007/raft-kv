@@ -721,6 +721,18 @@ not done it, so the published numbers come from the configuration above.
   deterministic `KvClusterTest.deposedLeaderNeverServesAStaleRead` (CheckQuorum off) catches it
   every time.
 
+**10,000-seed sweep** (`reports/chaos/chaos-baseline-10000-seeds.md`, commit `43a3adb`, 1 m 38 s on the
+2-core Codespace): **10,000 / 10,000 LINEARIZABLE**, 0 NOT_LINEARIZABLE, 0 INCONCLUSIVE, 0 internal-check
+failures. Every seed had at least 11 crashes (2 mid-I/O), 6 pauses, 16 partitions, 19 snapshots and 4
+InstallSnapshots.
+
+**Docker chaos after Phase 6: one unexplained violation (OPEN).** The first 180 s run on commit
+`43a3adb` (with `SNAPSHOT_THRESHOLD=200`) was **NOT_LINEARIZABLE** (key `k1`, 8,141 operations). A
+rerun was LINEARIZABLE, which does not explain the first. That run predates witness capture, so there is
+no witness; see `reports/chaos/docker-chaos-180s-phase6-notes.md` for everything known and what
+has been ruled out. **Until it is reproduced and explained, the system cannot be claimed
+linearizable under Docker-level faults.**
+
 **INCONCLUSIVE runs.** 5 in total, all in mutation suites (broken builds produce histories that
 are expensive to refute), none in either baseline. They never count as passes. The fix, if
 needed, is shorter histories for those suites, not a longer timeout.
@@ -838,7 +850,7 @@ needed, is shorter histories for those suites, not a longer timeout.
     leader wakes up deposed without knowing it: exactly the case ReadIndex protects against.
   - **`docker network disconnect` / `connect`**: cuts the node off from peers *and* clients
     (published ports go through that network).
-- **Result** (`reports/chaos/docker-chaos-180s.md`, commit `3efea60`): **LINEARIZABLE**.
+- **Result** (`reports/chaos/docker-chaos-180s-phase5.md`, commit `3efea60`): **LINEARIZABLE**.
   6,455 operations (6,430 completed, 13 pending writes, 12 reads left out), 19 kills, 26
   pauses, 10 disconnects, peak 132 MiB per container. The check took 138 ms.
 - **Honesty about what `docker kill` tests.** `docker kill` is a **process crash, not a power
