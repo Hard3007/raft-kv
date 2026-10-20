@@ -8,3 +8,6 @@ data/
 .idea/
 *.iml
 .vscode/
+reports/chaos/chaos-ci-*
+reports/chaos/chaos-replay-*
+reports/chaos/chaos-smoke-*

@@ -61,6 +61,7 @@ public final class SimNetwork {
     private boolean longDelays;
     private MessageFilter filter = (from, to, message) -> false;
     private long messagesSent;
+    private long messagesLost;
 
     public SimNetwork(Simulation simulation) {
         this.simulation = simulation;
@@ -139,6 +140,11 @@ public final class SimNetwork {
         return messagesSent;
     }
 
+    /** Requests and replies dropped by random loss (not counting partitions or crashes). */
+    public long messagesLost() {
+        return messagesLost;
+    }
+
     private boolean canTalk(int from, int to) {
         return isConnected(from) && isConnected(to) && groupOf.get(from).equals(groupOf.get(to));
     }
@@ -151,7 +157,11 @@ public final class SimNetwork {
     }
 
     private boolean lost() {
-        return unreliable && random.nextInt(10) == 0;
+        if (unreliable && random.nextInt(10) == 0) {
+            messagesLost++;
+            return true;
+        }
+        return false;
     }
 
     /**

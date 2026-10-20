@@ -23,11 +23,16 @@ jobs:
       - name: Build and test
         run: ./gradlew build --console=plain
 
-      # Phase 4 adds: ./gradlew chaos -Pruns=50
+      # 50 seeded chaos runs on the simulated cluster, each checked for linearizability.
+      # Fails the build on any NOT_LINEARIZABLE or INCONCLUSIVE run.
+      - name: Chaos (50 seeds)
+        run: ./gradlew chaos -Pruns=50 -Plabel=ci --console=plain
 
       - name: Upload test reports
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: test-reports
-          path: "**/build/reports/tests/"
+          path: |
+            **/build/reports/tests/
+            reports/chaos/chaos-ci-*

@@ -180,6 +180,9 @@ public final class KvClient {
     }
 
     private <T> void finish(Consumer<KvResult<T>> done, KvResult<T> result) {
+        // Retire the current attempt: a late reply to it must not complete this operation a
+        // second time (for example after giving up at the deadline).
+        attemptNumber++;
         busy = false;
         done.accept(result);
     }

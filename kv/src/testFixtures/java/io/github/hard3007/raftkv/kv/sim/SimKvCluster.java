@@ -186,9 +186,12 @@ public final class SimKvCluster {
     public KvClient newClient(KvClient.Options options) {
         int endpoint = nextClientEndpoint++;
         network.registerEndpoint(endpoint);
+        // Each client starts at a random server (and walks the others in order from there), the way
+        // real clients spread their first requests. Followers redirect them to the leader.
+        int first = 1 + random.nextInt(size);
         List<Integer> servers = new ArrayList<>();
-        for (int i = 1; i <= size; i++) {
-            servers.add(i);
+        for (int k = 0; k < size; k++) {
+            servers.add(after(first, k));
         }
         long clientId = (random.nextLong() & Long.MAX_VALUE) | 1; // positive and non-zero
         return new KvClient(clientId, servers, new SimClientTransport(endpoint), sim.newNodeScheduler(), options);
