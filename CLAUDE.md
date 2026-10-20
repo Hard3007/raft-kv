@@ -71,7 +71,8 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 
 ## Phases
 - [x] **0. Scaffold** — Gradle wrapper, modules, CLAUDE.md, CI skeleton, proto files. Build passes.
-- [ ] **1. Storage** — WAL, B-Tree, recovery. Verify: 100k-op TreeMap oracle test, crash-recovery test.
+- [x] **1. Storage** — WAL, B-Tree, recovery. 100k-op TreeMap oracle test and crash-recovery tests pass.
+  The recovery tests were shown to catch three deliberate bugs (see DESIGN.md §1.4).
 - [ ] **2. Raft core on the simulated network** — election, replication, persistence. Verify: all lab-style tests pass 50× in a row.
 - [ ] **3. KV state machine** — sessions, ReadIndex reads, no-op on election, client library.
 - [ ] **4. Linearizability checker + chaos harness** — checker self-tests (incl. pending ops), 500 chaos runs,
@@ -85,13 +86,26 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
-- Done: Phase 0.
-- Next: Phase 1 (storage). Waiting for the user to say "continue".
+- Done: Phases 0–1.
+- Next: Phase 2 (Raft core on the simulated network). Waiting for the user to say "continue".
+- Phase 2 notes: the Raft persister should be the real `Wal` running on `SimulatedFileSystem`, so the
+  simulator exercises the same persistence code as production (decision 12). Raft state that must be
+  durable before an RPC reply uses `FsyncPolicy.ALWAYS`.
 
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
   All come from the third-party protobuf Gradle plugin 0.10.0 (`ProtobufPlugin.groovy`, `ToolsLocator.groovy`),
   not from our build scripts. Revisit when a newer plugin release fixes them. Our own scripts must stay warning-free.
+
+## Storage module map (Phase 1)
+- `FileSystem` / `StorageFile` interfaces; `DiskFileSystem` (real, fsyncs directory on create/rename);
+  `SimulatedFileSystem` (seeded; process crash, power loss with lost/torn/reordered writes, crash at Nth op).
+- `Wal`: CRC32 records, LSNs, torn-tail truncation, `FsyncPolicy` ALWAYS/LAZY, atomic `reset()` via tmp + rename.
+- `BTree`: public API (get/put/delete/write(WriteBatch)/scan/appliedIndex/sync/checkpoint).
+  One WAL record per batch with full page images + meta. Write-ahead rule in `BTree.writeBack`.
+  Internals: `PageFile` (4 KB pages), `PageCache` (LRU, eviction only between ops), `Node`/`LeafNode`/`InternalNode`.
+- Limits: key ≤ 256 B, value ≤ 1024 B (any entry < 1/3 page, so a split always fits). No merge on delete.
+- DESIGN.md §1 explains all of it, including the lazy-fsync trade-off.
 
 ## Commands
 - Build + all tests: `./gradlew build`
