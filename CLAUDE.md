@@ -73,8 +73,9 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - [x] **0. Scaffold** — Gradle wrapper, modules, CLAUDE.md, CI skeleton, proto files. Build passes.
 - [x] **1. Storage** — WAL, B-Tree, recovery. 100k-op TreeMap oracle test and crash-recovery tests pass.
   The recovery tests were shown to catch three deliberate bugs (see DESIGN.md §1.4).
-- [ ] **2. Raft core on the simulated network** — election, replication, persistence. Verify: all lab-style tests pass 50× in a row.
-- [ ] **3. KV state machine** — sessions, ReadIndex reads, no-op on election, client library.
+- [x] **2. Raft core on the simulated network** — election, replication, persistence. All lab-style tests pass with
+  50 seeds (1,121 runs; a 500-seed sweep of 11,021 runs also passed). Mutations M1–M4 are all caught (DESIGN.md §2.5).
+- [ ] **3. KV state machine** — sessions, ReadIndex reads (gated on the leader's no-op, which exists since Phase 2), client library.
 - [ ] **4. Linearizability checker + chaos harness** — checker self-tests (incl. pending ops), 500 chaos runs,
   deliberately break the system (e.g., follower reads), show it is caught, then revert. Add 50-seed chaos to CI.
 - [ ] **5. gRPC transport** — GATE: before any Docker work, an in-process integration test runs 5 nodes with real
@@ -86,11 +87,17 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
-- Done: Phases 0–1.
-- Next: Phase 2 (Raft core on the simulated network). Waiting for the user to say "continue".
-- Phase 2 notes: the Raft persister should be the real `Wal` running on `SimulatedFileSystem`, so the
-  simulator exercises the same persistence code as production (decision 12). Raft state that must be
-  durable before an RPC reply uses `FsyncPolicy.ALWAYS`.
+- Done: Phases 0–2.
+- Next: Phase 3 (KV state machine, sessions, ReadIndex, client library). Waiting for the user to say "continue".
+- Phase 3 constraints (decided now):
+  - **Stay within the B-Tree limits** (key ≤ 256 B, value ≤ 1024 B). Data keys are a 1-byte prefix plus the user key,
+    so the API caps user keys at 255 B and values at 1024 B and rejects larger ones before proposing.
+    Session entries use the key `prefix + clientId (8 B)`, and their value is `lastSeq (8 B) + cached reply`.
+    The cached reply holds only a write's status and the `existed` flag, never a value, so it stays tiny.
+  - One B-Tree `WriteBatch` per applied entry: the data change, the session update, and `setAppliedIndex(index)`.
+  - On restart, Raft must resume with lastApplied = commitIndex = the B-Tree's appliedIndex
+    (RaftNode currently starts at 0; add a constructor parameter).
+  - ReadIndex waits for the leader's no-op to commit; reads never go through the log.
 
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
@@ -107,6 +114,18 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - Limits: key ≤ 256 B, value ≤ 1024 B (any entry < 1/3 page, so a split always fits). No merge on delete.
 - DESIGN.md §1 explains all of it, including the lazy-fsync trade-off.
 
+## Raft module map (Phase 2)
+- `RaftNode`: Figure 2, tagged `[Fig2 <rule>]`; `RaftLog` (in memory); `RaftStorage` (one `RaftStateRecord` per
+  save on a `Wal` with ALWAYS fsync); interfaces `Scheduler`, `Transport`, `RaftRpcHandler`, `StateMachine`; `RaftConfig`.
+- `raft.sim`: `Simulation` (virtual-time event loop, one seed), `SimNetwork` (disconnect, partition, 10% loss, delays,
+  long delays, message filter).
+- Tests: `RaftCluster` harness (Election Safety after every event, State Machine Safety + in-order apply on every apply),
+  `RaftNodeTest` (receiver rules), `RaftElectionTest`/`RaftAgreementTest`/`RaftPersistenceTest` (MIT 6.5840 3A–3C),
+  `RaftScenarioTest` (deterministic Figure 8, fast backup). Seeds: `./gradlew :raft:test -PraftSeeds=50`.
+- Mutation testing (DESIGN.md §2.5): the no-op on election masks the Figure 8 bug under large batches, so the
+  Figure 8 tests run with `maxEntriesPerAppend = 1`. Keep that when changing replication (Phase 7).
+
 ## Commands
 - Build + all tests: `./gradlew build`
 - One module's tests: `./gradlew :storage:test`
+- Raft tests with N seeds each: `./gradlew :raft:test -PraftSeeds=50`

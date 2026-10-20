@@ -148,7 +148,141 @@ and the B-Tree is a cache of the state machine. So the B-Tree can run with `LAZY
 | Real disk: crash without close plus a garbage WAL tail | all 500 batches recovered | `BTreeRecoveryTest.realDiskRecoversAfterCrashWithoutCloseAndATornWalTail` |
 | B-Tree logic (splits, scans, unsigned key order, deletes) | matches a `TreeMap` | `BTreeOracleTest` (100,000 ops, 32-page cache, reopen midway) |
 
+## 2. Raft (`raft/`)
+
+### 2.1 Structure
+- **`RaftNode`** implements Figure 2. It is purely event-driven: RPC handlers, reply callbacks,
+  timer callbacks and `propose()` are its only entry points. All of them run on one thread, it
+  never creates threads, and it never reads the clock. Time and timers come from an injected
+  `Scheduler`; outgoing RPCs go through an injected `Transport`.
+- **`RaftLog`** is the in-memory log. Indices start at 1, and index 0 is a sentinel with term 0.
+- **`RaftStorage`** is the durable state. Every save appends one `RaftStateRecord` (term,
+  votedFor, optional truncation point, new entries) to a `Wal` with `FsyncPolicy.ALWAYS`.
+  - One record per change means a crash can never persist half a change, for example a
+    truncation without the entries that replace it.
+  - Recovery replays the records in order.
+- **Simulation (`raft.sim`).** `Simulation` is a discrete-event loop on virtual time, with
+  events ordered by (time, insertion order). `SimNetwork` implements `Transport` and can:
+  disconnect nodes, partition the cluster into groups, drop 10% of requests and replies,
+  delay messages 0–27 ms (which reorders them), occasionally delay one by 200–2000 ms, and run a
+  test-supplied filter that observes or drops chosen messages.
+  - All randomness comes from one seed, so **a failing seed replays exactly**.
+  - Virtual time makes a 30-second scenario take about 0.1–0.5 s of wall time.
+- **Crash = power loss.** A simulated crash kills the node's timers and in-flight messages and
+  calls `SimulatedFileSystem.simulatePowerLoss()` on its disk. A restarted node runs the real
+  recovery code on whatever was fsynced.
+
+### 2.2 Decisions and trade-offs
+- **No "check quorum".** Figure 2 does not make a leader step down when it cannot reach a
+  majority, so a partitioned leader keeps believing it leads. That is safe: it cannot commit
+  anything, and its first contact with a newer term demotes it. ReadIndex (Phase 3) will not
+  rely on leases; it confirms leadership with a heartbeat quorum for each read.
+- **The election timer is reset only** on: (a) an AppendEntries from the current-term leader,
+  (b) granting a vote, (c) starting an election. It is *not* reset by rejected RequestVotes, or
+  by RPCs from stale terms. Otherwise a node with a stale log could keep everyone from timing out.
+- **Persist before replying, and before applying.** A follower saves term, vote and log changes
+  before replying *and* before advancing commitIndex and applying. So the state machine can never
+  get ahead of the durable log, which matters once the B-Tree persists `lastApplied` (Phase 3).
+- **The leader persists its own entries before counting itself** toward a majority.
+- **Fast backtracking.** The follower replies `conflict_term` and `conflict_index`. The leader then:
+  - jumps to `conflict_index` if the follower's log is too short (`conflict_term = 0`);
+  - otherwise, if it has entries from `conflict_term`, jumps to just after its last such entry;
+  - otherwise skips the follower's whole conflicting term.
+
+  Stale or reordered replies never move `nextIndex` or `matchIndex` backwards.
+- **No-op on election** (§5.4.2, §8). A new leader appends a `NOOP` entry for its term
+  immediately, so earlier-term entries commit without waiting for a client write. Phase 3's
+  ReadIndex will not serve reads until that no-op is committed.
+- **Randomized election timeouts in [150, 300) ms, heartbeats every 50 ms.** These are the
+  paper's numbers. Heartbeats are well below the minimum timeout, so a healthy leader is never
+  deposed.
+- **Simplicity over throughput (for now).** AppendEntries carries up to 64 entries. It is sent
+  on every proposal, every heartbeat, and right after a reply that leaves the follower behind.
+  There is no pipelining or in-flight limit yet; Phase 7 adds batching and pipelining and
+  measures the difference.
+
+### 2.3 Figure 2 rules → code → tests
+Tags in the code look like `// [Fig2 AppendEntries-3]`. "Rules for Servers" are numbered in
+the order the paper lists them. All code is in `RaftNode` unless noted. "Cluster tests" means
+the always-on harness checks (Election Safety after every event, State Machine Safety and
+in-order apply on every apply) that every simulated-cluster test runs.
+
+| Rule (Figure 2) | Code | Tests that cover it |
+|---|---|---|
+| State: persistent `currentTerm`, `votedFor`, `log[]` | fields; `RaftStorage` | `RaftStorageTest`, `RaftNodeTest.persist_*` |
+| State: volatile `commitIndex`, `lastApplied`; leader `nextIndex[]`, `matchIndex[]` (reinitialized after election) | fields; `becomeLeader` | all cluster tests |
+| Persist: update stable storage before responding to RPCs | `handleRequestVote`, `handleAppendEntries`, `startElection` (self-vote before RequestVotes go out), `appendToOwnLog` | `RaftNodeTest.persist_voteAndTermSurviveACrash`, `persist_termLearnedFromARejectedRequestSurvivesACrash`, `persist_logSurvivesACrashIncludingTruncation`, `persist_candidatesSelfVoteSurvivesACrash`; `RaftPersistenceTest.*` |
+| RequestVote-1: reply false if term < currentTerm | `handleRequestVote` | `RaftNodeTest.requestVote1_rejectsCandidateFromAnOlderTerm` |
+| RequestVote-2: grant if votedFor is null or candidateId, and the candidate's log is at least as up-to-date | `handleRequestVote`, `candidateLogIsUpToDate` | `RaftNodeTest.requestVote2_*` (4 tests); `RaftAgreementTest.partitionedLeaderRejoins`; `RaftPersistenceTest.figure8OnUnreliableNetwork` |
+| AppendEntries-1: reply false if term < currentTerm | `processAppendEntries` | `RaftNodeTest.appendEntries1_rejectsLeaderFromAnOlderTerm` |
+| AppendEntries-2: reply false if no entry at prevLogIndex with prevLogTerm (+ conflict hints) | `processAppendEntries` | `RaftNodeTest.appendEntries2_*` (2 tests); `RaftScenarioTest.fastBackup_*` |
+| AppendEntries-3: delete a conflicting entry and all that follow it | `processAppendEntries` | `RaftNodeTest.appendEntries3_*` (2 tests); `RaftAgreementTest.fastLogBackup`, `partitionedLeaderRejoins` |
+| AppendEntries-4: append any new entries not already in the log | `processAppendEntries` | `RaftNodeTest.appendEntries4_newEntriesAreAppended`; all agreement tests |
+| AppendEntries-5: commitIndex = min(leaderCommit, index of last new entry) | `handleAppendEntries` | `RaftNodeTest.appendEntries5_*` (2 tests) |
+| All-1: if commitIndex > lastApplied, apply log[lastApplied] in order | `applyCommittedEntries` | `RaftNodeTest.appendEntries5_commitIndexIsTheSmallerOf...`; the harness's in-order check in every cluster test |
+| All-2: term T > currentTerm in a request or response → adopt T, become follower | `handleRequestVote`, `processAppendEntries`, `onRequestVoteReply`, `onAppendEntriesReply`, `stepDown` | `RaftNodeTest.all2_*`; `RaftElectionTest.reElectionAfterLeaderFailure` |
+| Follower-1: respond to RPCs from candidates and leaders | `handleRequestVote`, `handleAppendEntries` | all tests |
+| Follower-2: election timeout without hearing from the leader or granting a vote → candidate | `resetElectionTimer`, `onElectionTimeout` | `RaftElectionTest.*`; `RaftNodeTest.candidate3_*` |
+| Candidate-1: increment term, vote for self, reset timer, send RequestVote to all | `startElection` | `RaftElectionTest.*`; `RaftNodeTest.persist_candidatesSelfVoteSurvivesACrash` |
+| Candidate-2: votes from a majority → leader | `onRequestVoteReply` | `RaftElectionTest.initialElection`, `manyElections`, `noLeaderWithoutQuorum` |
+| Candidate-3: AppendEntries from the new leader → follower | `processAppendEntries` | `RaftNodeTest.candidate3_candidateStepsDownOnAppendEntriesFromLeaderOfSameTerm` |
+| Candidate-4: election timeout → new election | `onElectionTimeout` | `RaftElectionTest.reElectionAfterLeaderFailure`, `noLeaderWithoutQuorum` |
+| Leader-1: initial heartbeat on election; repeat during idle periods | `becomeLeader`, `scheduleHeartbeat` | `RaftElectionTest.initialElection` (term must not change for 2 s) |
+| Leader-2: append client command to the local log; respond after it is applied | `propose` (responding comes in Phase 3) | `RaftAgreementTest.*` |
+| Leader-3: send entries from nextIndex; on success update nextIndex/matchIndex; on inconsistency back up and retry | `sendAppendEntries`, `onAppendEntriesReply`, `fastBackupNextIndex` | `RaftAgreementTest.fastLogBackup`, `followerRejoinsAndCatchesUp`; `RaftScenarioTest.fastBackup_skipsAWholeConflictingTermPerRoundTrip` |
+| Leader-4: commit N if a majority has matchIndex ≥ N **and log[N].term == currentTerm** | `advanceCommitIndex` | `RaftScenarioTest.figure8_leaderDoesNotCommitPreviousTermEntryByCountingReplicas`; `RaftPersistenceTest.figure8OnUnreliableNetwork` |
+| Beyond Figure 2: leader no-op (§5.4.2, §8) | `becomeLeader` | all cluster tests (each leader's first entry) |
+
+### 2.4 The lab-style tests
+These are modeled on the MIT 6.5840 Raft lab (3A–3C). Every one runs per seed:
+`./gradlew :raft:test -PraftSeeds=N` (the default is 3, for fast builds).
+
+| Requirement | Tests |
+|---|---|
+| Initial election | `RaftElectionTest.initialElection` |
+| Re-election after leader failure | `RaftElectionTest.reElectionAfterLeaderFailure`, `manyElections` |
+| No leader without quorum | `RaftElectionTest.noLeaderWithoutQuorum` (and inside `reElectionAfterLeaderFailure`) |
+| Basic agreement | `RaftAgreementTest.basicAgreement`, `concurrentProposals` |
+| Agreement despite failures | `RaftAgreementTest.agreementDespiteFollowerFailure`, `agreementDespiteLeaderFailure`, `followerRejoinsAndCatchesUp`, `noAgreementWithoutMajority` |
+| Rejoin of a partitioned leader | `RaftAgreementTest.partitionedLeaderRejoins` |
+| Fast log backup | `RaftAgreementTest.fastLogBackup`, `RaftScenarioTest.fastBackup_skipsAWholeConflictingTermPerRoundTrip` (at most 2 rejections instead of 50) |
+| Persistence across crashes | `RaftPersistenceTest.persistenceAcrossCrashes`, `persistenceWithRepeatedPartialFailures`, `partitionedLeaderAndCrashedFollower` |
+| Unreliable network (Figure 8) | `RaftPersistenceTest.agreementOnUnreliableNetwork`, `figure8CrashingLeaders`, `figure8OnUnreliableNetwork`; `RaftScenarioTest.figure8_*` |
+| Churn | `RaftPersistenceTest.churn`, `churnOnUnreliableNetwork` |
+
+**Phase 2 gate.** All tests pass with 50 seeds each (1,121 test runs, about 10 s of wall time).
+A wider sweep, 500 seeds each (11,021 runs), also passed.
+
+### 2.5 Mutation testing: does the suite catch real Raft bugs?
+Each bug was injected into `RaftNode`, the full suite was run with 10 seeds, and the bug was
+reverted.
+
+| Injected bug | Caught by | Example failure |
+|---|---|---|
+| **M1.** Voters ignore `last_log_term` in the up-to-date check (compare lengths only) | `RaftNodeTest.requestVote2_*` (2 tests); `RaftAgreementTest.partitionedLeaderRejoins` (10/10 seeds), `fastLogBackup` (6/10); `RaftPersistenceTest.figure8OnUnreliableNetwork` (10/10) | `State Machine Safety violated at index 10: node 3 applied (term 4, COMMAND 'cmd-99') but another node applied (term 5, NOOP '')` |
+| **M2.** Leader commits previous-term entries by counting replicas (the Figure 8 bug) | `RaftScenarioTest.figure8_*` (10/10 seeds); `RaftPersistenceTest.figure8OnUnreliableNetwork` (5/10 seeds; 129/200 in a longer run) | `S1 must not commit its term-2 entry by counting replicas ==> expected: <0> but was: <2>` |
+| **M3.** `currentTerm`/`votedFor` not persisted before replying to RequestVote | `RaftNodeTest.persist_voteAndTermSurviveACrash`, `persist_termLearnedFromARejectedRequestSurvivesACrash` | `currentTerm must be durable before replying ==> expected: <7> but was: <0>` |
+| **M4.** Follower does not truncate conflicting entries (keeps whatever it has at an index) | 11 tests across all suites, including `RaftNodeTest.appendEntries3_*`, `RaftScenarioTest.fastBackup_*`, `RaftAgreementTest.partitionedLeaderRejoins`, `RaftPersistenceTest.persistenceWithRepeatedPartialFailures` (76 failed runs) | `State Machine Safety violated at index 2: node 2 applied (term 2, COMMAND 'stale-2') but another node applied (term 3, COMMAND 'leader-2')` |
+
+**What the mutation runs taught us.**
+- **The no-op hides the Figure 8 bug (M2).** With the default batch of 64 entries per
+  AppendEntries, the randomized tests did not catch M2 in 200 seeds. A new leader's no-op is in
+  its log from the start, and every AppendEntries runs to the end of the log. So an older-term
+  entry essentially never reaches a majority without the current-term no-op arriving alongside
+  it, and the buggy rule commits the same thing the correct rule does.
+  - The bug is still real. A follower more than one batch behind, or Phase 7's pipelining,
+    could expose it.
+  - That is why there is a deterministic scenario test (`maxEntriesPerAppend = 1`, a message
+    filter, and seeded logs that recreate Figure 8 exactly).
+  - The randomized Figure 8 tests now also run with one entry per AppendEntries, which makes
+    them catch M2 too.
+- **The missing persist (M3) has a tiny window.** The next save, triggered by any
+  AppendEntries or election, writes the term and vote anyway. A random crash would have to land
+  in exactly that window. The randomized suites did not catch it in 200 seeds; the direct
+  crash-and-restart unit tests catch it every time. Phase 4's chaos harness adds more crash
+  points, but this rule is guarded by its unit tests.
+
 ## To be written
-- Raft (Phase 2), the KV state machine and ReadIndex (Phase 3), the linearizability checker and
-  chaos testing (Phase 4), the transport and threading model (Phase 5), snapshots (Phase 6),
+- The KV state machine and ReadIndex (Phase 3), the linearizability checker and chaos testing
+  (Phase 4), the gRPC transport and production threading model (Phase 5), snapshots (Phase 6),
   and performance (Phase 7).

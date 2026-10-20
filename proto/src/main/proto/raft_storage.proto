@@ -1,0 +1,17 @@
+// On-disk format of Raft's persistent state (Figure 2: currentTerm, votedFor, log[]).
+// Each record is one WAL record; replaying them in order rebuilds the state.
+syntax = "proto3";
+
+package raftkv.raft;
+
+import "raft.proto";
+
+option java_package = "io.github.hard3007.raftkv.proto.raft";
+option java_multiple_files = true;
+
+message RaftStateRecord {
+  int64 current_term = 1;
+  int32 voted_for = 2;            // 0 = voted for nobody in current_term
+  int64 truncate_from = 3;        // 0 = none; otherwise drop every entry with index >= truncate_from first
+  repeated LogEntry entries = 4;  // then append these
+}
