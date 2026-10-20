@@ -131,10 +131,30 @@ public final class SimKvCluster {
         snapshotsTakenByDeadIncarnations += last.snapshotsTaken();
         snapshotsInstalledByDeadIncarnations += last.snapshotsInstalled();
         nodes[i].scheduler.kill();
+        network.resume(i); // a crash ends any pause; the restarted process is not frozen
         nodes[i].raft.stop();
         network.unregister(i);
         disks[i].simulatePowerLoss();
         nodes[i] = null;
+    }
+
+    /**
+     * Freezes a node, like a long GC pause or {@code docker pause}: its timers stop and messages
+     * for it wait until {@link #resume}. A paused leader cannot notice it lost its majority, so it
+     * wakes up still believing it leads: the case ReadIndex must handle.
+     */
+    public void pause(int i) {
+        if (nodes[i] != null) {
+            nodes[i].scheduler.pause();
+            network.pause(i);
+        }
+    }
+
+    public void resume(int i) {
+        network.resume(i);
+        if (nodes[i] != null) {
+            nodes[i].scheduler.resume();
+        }
     }
 
     public void restart(int i) {

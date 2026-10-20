@@ -48,6 +48,11 @@ public final class ChaosMain {
         int threads = Integer.parseInt(options.getOrDefault("threads",
                 Integer.toString(Math.max(1, Runtime.getRuntime().availableProcessors()))));
         ChaosConfig config = ChaosConfig.defaults();
+        if (options.getOrDefault("check-quorum", "true").equals("false")) {
+            // ReadIndex must be safe without CheckQuorum, whose timeouts otherwise shorten the time a
+            // deposed leader stays unaware; this variant keeps that dangerous window open.
+            config = config.withRaft(config.raft().withCheckQuorum(false));
+        }
 
         System.out.printf("chaos: %d runs from seed %d (%s), %d threads%n", runs, startSeed, label, threads);
         long wallStart = System.currentTimeMillis();
@@ -62,7 +67,8 @@ public final class ChaosMain {
         long errors = results.stream().filter(r -> r.error() != null).count();
 
         String command = "./gradlew chaos -Pruns=" + runs + (startSeed != 1 ? " -PstartSeed=" + startSeed : "")
-                + (label.equals("baseline") ? "" : " -Plabel=" + label);
+                + (label.equals("baseline") ? "" : " -Plabel=" + label)
+                + (config.raft().checkQuorum() ? "" : " -PcheckQuorum=false");
         writeReport(report, label, command, config, results, counts, errors, wallMillis);
         writeCsv(Path.of(report.toString().replaceAll("\\.md$", ".csv")), results);
 
@@ -133,6 +139,7 @@ public final class ChaosMain {
         row(md, "reads left out (no definite answer)", measured, r -> r.stats().discardedReads());
         row(md, "node crashes (power loss)", measured, r -> r.stats().crashes());
         row(md, "  of which mid-I/O (crash at a random write/fsync/rename)", measured, r -> r.stats().midIoCrashes());
+        row(md, "node pauses (frozen 0.5-2 s)", measured, r -> r.stats().pauses());
         row(md, "partitions", measured, r -> r.stats().partitions());
         row(md, "message-loss periods", measured, r -> r.stats().lossPeriods());
         row(md, "messages lost", measured, r -> r.stats().messagesLost());
@@ -178,7 +185,7 @@ public final class ChaosMain {
 
     private static void writeCsv(Path path, List<ChaosRun.Result> results) throws IOException {
         StringBuilder csv = new StringBuilder("seed,verdict,operations,completed,pending_writes,discarded_reads,"
-                + "crashes,mid_io_crashes,partitions,loss_periods,messages_lost,long_delay_periods,snapshots_taken,"
+                + "crashes,mid_io_crashes,pauses,partitions,loss_periods,messages_lost,long_delay_periods,snapshots_taken,"
                 + "snapshots_installed,final_term,virtual_ms,wall_ms\n");
         for (ChaosRun.Result r : results) {
             ChaosRun.Stats s = r.stats();
@@ -188,7 +195,7 @@ public final class ChaosMain {
             }
             csv.append(r.seed()).append(',').append(r.verdict()).append(',').append(s.operations()).append(',')
                     .append(s.completed()).append(',').append(s.pendingWrites()).append(',').append(s.discardedReads())
-                    .append(',').append(s.crashes()).append(',').append(s.midIoCrashes()).append(',').append(s.partitions()).append(',')
+                    .append(',').append(s.crashes()).append(',').append(s.midIoCrashes()).append(',').append(s.pauses()).append(',').append(s.partitions()).append(',')
                     .append(s.lossPeriods()).append(',').append(s.messagesLost()).append(',')
                     .append(s.longDelayPeriods()).append(',').append(s.snapshotsTaken()).append(',')
                     .append(s.snapshotsInstalled()).append(',').append(s.finalTerm()).append(',')

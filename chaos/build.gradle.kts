@@ -22,6 +22,7 @@ tasks.register<JavaExec>("chaos") {
         "--runs", providers.gradleProperty("runs").getOrElse("50"),
         "--start-seed", providers.gradleProperty("startSeed").getOrElse("1"),
         "--label", providers.gradleProperty("label").getOrElse("baseline"),
+        "--check-quorum", providers.gradleProperty("checkQuorum").getOrElse("true"),
     )
     if (providers.gradleProperty("verbose").isPresent) {
         chaosArgs.add("--verbose")

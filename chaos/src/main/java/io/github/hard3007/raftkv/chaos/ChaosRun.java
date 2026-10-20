@@ -27,7 +27,8 @@ import java.util.function.BooleanSupplier;
  * <p><b>Faults</b> (one action every 100-400 ms of virtual time, chosen at random):
  * crash a node (power loss; at most two down at once), arm a crash at one of a node's next 0-30
  * I/O operations (so crashes also land mid-append, mid-snapshot, mid-install), restart a crashed
- * node, isolate the
+ * node, pause a node for 0.5-2 s (its timers and incoming messages are held, like a GC pause or
+ * docker pause), isolate the
  * leader together with some clients, split the cluster into a random minority and majority
  * (clients assigned to random sides), heal all partitions, toggle 10% message loss, and toggle
  * long delays (some messages delayed 0.2-2 s, which reorders them and makes clients retry while
@@ -41,7 +42,7 @@ final class ChaosRun {
 
     /** What one run did, for the report. */
     record Stats(int operations, int completed, int pendingWrites, int discardedReads, int crashes, int midIoCrashes,
-            int partitions,
+            int pauses, int partitions,
             int lossPeriods, int longDelayPeriods, long messagesLost, long virtualMillis, long snapshotsTaken,
             long snapshotsInstalled, long finalTerm) {
     }
@@ -73,6 +74,8 @@ final class ChaosRun {
     private int discardedReads;
     private int crashes;
     private int midIoCrashes;
+    private int pauses;
+    private final Set<Integer> pausedNodes = new HashSet<>();
     private final Set<Integer> armed = new HashSet<>();
     private int partitions;
     private int lossPeriods;
@@ -120,7 +123,7 @@ final class ChaosRun {
         List<Operation> operations = history.operations();
         CheckResult check = new LinearizabilityChecker(config.checkerTimeout()).check(operations);
         Stats stats = new Stats(operations.size() + discardedReads, completed, pendingWrites, discardedReads, crashes,
-                midIoCrashes, partitions, lossPeriods, longDelayPeriods, cluster.network.messagesLost(), cluster.sim.now(),
+                midIoCrashes, pauses, partitions, lossPeriods, longDelayPeriods, cluster.network.messagesLost(), cluster.sim.now(),
                 cluster.snapshotsTaken(), cluster.snapshotsInstalled(), highestTerm());
         return new Result(seed, check.verdict(), stats, check, faultLog, operations,
                 System.currentTimeMillis() - wallStart, null);
@@ -198,10 +201,11 @@ final class ChaosRun {
     }
 
     private void injectFault() {
-        switch (random.nextInt(8)) {
+        switch (random.nextInt(9)) {
             case 0 -> crashSomeNode();
             case 1 -> restartSomeNode();
             case 7 -> armCrashAtNextIo();
+            case 8 -> pauseSomeNode();
             case 2 -> isolateLeader();
             case 3 -> randomSplit();
             case 4 -> {
@@ -301,6 +305,23 @@ final class ChaosRun {
         }
     }
 
+    /** Freezes a live node for 0.5-2 s (like a GC pause): it wakes up believing what it believed before. */
+    private void pauseSomeNode() {
+        int node = 1 + random.nextInt(config.nodes());
+        if (!cluster.isAlive(node) || pausedNodes.contains(node)) {
+            return;
+        }
+        cluster.pause(node);
+        pausedNodes.add(node);
+        pauses++;
+        log("pause node " + node);
+        cluster.sim.schedule(500 + random.nextInt(1501), () -> {
+            cluster.resume(node);
+            pausedNodes.remove(node);
+            log("resume node " + node);
+        });
+    }
+
     /** Arms a crash at one of a live node's next 0-30 mutating I/O operations (write, fsync, rename, ...). */
     private void armCrashAtNextIo() {
         int node = 1 + random.nextInt(config.nodes());
@@ -334,6 +355,10 @@ final class ChaosRun {
     }
 
     private void healEverything() {
+        for (int node : List.copyOf(pausedNodes)) {
+            cluster.resume(node);
+        }
+        pausedNodes.clear();
         for (int node : armed) {
             cluster.disk(node).crashAfter(-1); // disarm crashes that have not fired yet
         }

@@ -8,8 +8,10 @@ import io.github.hard3007.raftkv.proto.raft.RequestVoteReply;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
 import io.github.hard3007.raftkv.raft.RaftRpcHandler;
 import io.github.hard3007.raftkv.raft.Transport;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -59,6 +61,9 @@ public final class SimNetwork {
     private final Map<Integer, Boolean> connected = new HashMap<>();
     private final Map<Integer, Integer> groupOf = new HashMap<>();
 
+    private final Set<Integer> paused = new HashSet<>();
+    /** Deliveries waiting for a paused node, in arrival order. */
+    private final Map<Integer, List<Runnable>> held = new HashMap<>();
     private boolean unreliable;
     private boolean longDelays;
     private MessageFilter filter = (from, to, message) -> false;
@@ -123,6 +128,39 @@ public final class SimNetwork {
         groupOf.replaceAll((nodeId, group) -> 0);
     }
 
+    /**
+     * A paused node (see {@link Simulation.NodeScheduler#pause()}) receives nothing until it resumes:
+     * messages for it wait, the way bytes wait in a frozen process's socket buffers.
+     */
+    public void pause(int nodeId) {
+        paused.add(nodeId);
+    }
+
+    /**
+     * Wakes a paused node. Its waiting messages are delivered within the next 10 ms in a random
+     * order: a real process drains several connections (peers, clients) and nothing orders one
+     * connection relative to another, so a client request may be handled before a peer's
+     * newer-term heartbeat that arrived earlier.
+     */
+    public void resume(int nodeId) {
+        paused.remove(nodeId);
+        List<Runnable> waiting = held.remove(nodeId);
+        if (waiting != null) {
+            for (Runnable delivery : waiting) {
+                simulation.schedule(random.nextInt(10), delivery);
+            }
+        }
+    }
+
+    /** Runs {@code delivery} now, or when {@code nodeId} resumes if it is paused. */
+    private void whenAwake(int nodeId, Runnable delivery) {
+        if (paused.contains(nodeId)) {
+            held.computeIfAbsent(nodeId, n -> new ArrayList<>()).add(delivery);
+        } else {
+            delivery.run();
+        }
+    }
+
     /** Unreliable: each request and each reply is dropped with probability 10%. */
     public void setUnreliable(boolean unreliable) {
         this.unreliable = unreliable;
@@ -179,7 +217,7 @@ public final class SimNetwork {
         if (!canTalk(from, to) || lost() || filter.drop(from, to, request)) {
             return;
         }
-        simulation.schedule(delay(), () -> {
+        simulation.schedule(delay(), () -> whenAwake(to, () -> {
             AsyncHandler<Q, R> handler = live.contains(to) ? handlerAt.apply(to) : null;
             if (handler == null || !canTalk(from, to)) {
                 return;
@@ -190,14 +228,14 @@ public final class SimNetwork {
                 if (!receiverStillAlive || lost() || filter.drop(to, from, reply)) {
                     return;
                 }
-                simulation.schedule(delay(), () -> {
+                simulation.schedule(delay(), () -> whenAwake(from, () -> {
                     boolean senderStillAlive = live.contains(from) && incarnations.get(from) == senderIncarnation;
                     if (senderStillAlive && canTalk(from, to)) {
                         onReply.accept(reply);
                     }
-                });
+                }));
             });
-        });
+        }));
     }
 
     /** Adapts a synchronous Raft handler method on node {@code id} to an {@link AsyncHandler}. */

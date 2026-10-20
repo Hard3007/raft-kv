@@ -1,6 +1,8 @@
 package io.github.hard3007.raftkv.raft.sim;
 
 import io.github.hard3007.raftkv.common.Scheduler;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.function.BooleanSupplier;
@@ -88,6 +90,8 @@ public final class Simulation {
 
     public final class NodeScheduler implements Scheduler {
         private boolean alive = true;
+        private boolean paused;
+        private final List<Runnable> heldWhilePaused = new ArrayList<>();
 
         @Override
         public long nowMillis() {
@@ -97,7 +101,12 @@ public final class Simulation {
         @Override
         public Cancellable schedule(long delayMillis, Runnable task) {
             return Simulation.this.schedule(delayMillis, () -> {
-                if (alive) {
+                if (!alive) {
+                    return;
+                }
+                if (paused) {
+                    heldWhilePaused.add(task); // a frozen process runs nothing; the timer fires on resume
+                } else {
                     task.run();
                 }
             });
@@ -105,6 +114,30 @@ public final class Simulation {
 
         public void kill() {
             alive = false;
+        }
+
+        /** Freezes the node, like a long GC pause or SIGSTOP: none of its timers run until {@link #resume()}. */
+        public void pause() {
+            paused = true;
+        }
+
+        /**
+         * Unfreezes the node. Timers that came due while it was paused run 5-25 ms later, after
+         * the messages that were waiting for it (delivered within 10 ms, see SimNetwork). A real
+         * process waking from a pause may handle either first; this is the order that is hardest
+         * for ReadIndex: a deposed leader sees requests before its timers can tell it anything.
+         */
+        public void resume() {
+            paused = false;
+            List<Runnable> due = new ArrayList<>(heldWhilePaused);
+            heldWhilePaused.clear();
+            for (Runnable task : due) {
+                Simulation.this.schedule(5 + random.nextInt(21), () -> {
+                    if (alive) {
+                        task.run();
+                    }
+                });
+            }
         }
 
         @Override

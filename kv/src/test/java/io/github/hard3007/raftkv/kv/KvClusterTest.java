@@ -172,6 +172,34 @@ class KvClusterTest {
                 .orElseThrow());
     }
 
+    /** The pause fault: a frozen leader is replaced, and on waking it steps down instead of splitting the cluster. */
+    @ParameterizedTest(name = "seed {0}")
+    @MethodSource(SEEDS)
+    void pausedLeaderIsReplacedAndStepsDownWhenItWakes(long seed) {
+        SimKvCluster cluster = new SimKvCluster(5, seed).startAll();
+        KvClient client = cluster.newClient(KvClient.Options.defaults());
+        ok(cluster.<Void>await(done -> client.put(b("k"), b("v1"), done), WAIT));
+        int oldLeader = cluster.awaitLeader(WAIT);
+        long oldTerm = cluster.raft(oldLeader).status().term();
+
+        cluster.pause(oldLeader);
+        boolean replaced = cluster.sim.runUntil(() -> {
+            int now = cluster.leader();
+            return now != -1 && now != oldLeader;
+        }, 3_000);
+        assertTrue(replaced, "the others should elect a new leader while the old one is frozen");
+        assertEquals(RaftNode.Role.LEADER, cluster.raft(oldLeader).status().role(),
+                "a frozen node cannot have noticed anything");
+        assertEquals(oldTerm, cluster.raft(oldLeader).status().term());
+        ok(cluster.<Void>await(done -> client.put(b("k"), b("v2"), done), WAIT));
+
+        cluster.resume(oldLeader);
+        cluster.sim.runFor(1_000);
+        assertEquals(RaftNode.Role.FOLLOWER, cluster.raft(oldLeader).status().role());
+        assertArrayEquals(b("v2"), ok(cluster.<Optional<byte[]>>await(done -> client.get(b("k"), done), WAIT))
+                .orElseThrow());
+    }
+
     /** The reply to a delete is lost; the client retries with the same sequence number. */
     @ParameterizedTest(name = "seed {0}")
     @MethodSource(SEEDS)

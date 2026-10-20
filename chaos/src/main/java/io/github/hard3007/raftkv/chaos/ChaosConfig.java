@@ -29,6 +29,11 @@ public record ChaosConfig(int nodes, int clients, int keys, int operationsPerCli
                 Duration.ofSeconds(10), RaftConfig.defaults().withSnapshotThreshold(20).withSnapshotChunkBytes(64));
     }
 
+    public ChaosConfig withRaft(RaftConfig newRaft) {
+        return new ChaosConfig(nodes, clients, keys, operationsPerClient, maxThinkMs, minFaultGapMs, maxFaultGapMs,
+                clientOptions, checkerTimeout, newRaft);
+    }
+
     public String describe() {
         return nodes + " nodes, " + clients + " clients, " + keys + " keys, " + operationsPerClient
                 + " ops per client, think time 0-" + maxThinkMs + " ms, a fault action every " + minFaultGapMs + "-"

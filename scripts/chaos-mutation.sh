@@ -3,7 +3,7 @@
 # build, and restores the original source no matter what. Shows that the linearizability checker
 # catches each bug. Usage:
 #
-#   scripts/chaos-mutation.sh <mutation> [runs]
+#   scripts/chaos-mutation.sh <mutation> [runs] [-PcheckQuorum=false]
 #
 # Mutations:
 #   reads-without-readindex   the leader serves reads without the confirming heartbeat round
@@ -17,6 +17,7 @@ cd "$(dirname "$0")/.."
 
 mutation="${1:?usage: scripts/chaos-mutation.sh <mutation> [runs]}"
 runs="${2:-100}"
+extra="${3:-}"   # e.g. -PcheckQuorum=false
 
 case "$mutation" in
   reads-without-readindex)
@@ -55,11 +56,11 @@ fi
 echo "== mutation $mutation applied to $file:"
 diff "$backup" "$file" || true
 
-./gradlew chaos -Pruns="$runs" -Plabel="mutation-$mutation" -PexpectViolations --console=plain \
+./gradlew chaos -Pruns="$runs" -Plabel="mutation-$mutation$(echo "$extra" | sed "s/-PcheckQuorum=false/-no-checkquorum/")" $extra -PexpectViolations --console=plain \
   | grep -E "^chaos:|LINEARIZABLE=|runs done$" || true
 
 # Make the report self-describing: the "uncommitted changes" in its header are exactly this diff.
-report="reports/chaos/chaos-mutation-$mutation-$runs-seeds.md"
+report="reports/chaos/chaos-mutation-$mutation$(echo "$extra" | sed "s/-PcheckQuorum=false/-no-checkquorum/")-$runs-seeds.md"
 {
   echo
   echo "## Mutation applied"
