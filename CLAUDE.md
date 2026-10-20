@@ -81,8 +81,8 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - [x] **4. Linearizability checker + chaos harness** — checker self-tests and 15,000-history differential test pass;
   500/500 chaos runs LINEARIZABLE (0 INCONCLUSIVE); mutations caught in 34, 296 and 391 of 500 seeds; CI runs 50 seeds.
   See DESIGN.md §4.
-- [ ] **5. gRPC transport** — GATE: before any Docker work, an in-process integration test runs 5 nodes with real
-  threads (one executor per node) and the real gRPC transport, and passes. Then the Docker 5-node cluster and Docker-level chaos.
+- [x] **5. gRPC transport** — gate passed first (5 real nodes, real threads, real gRPC, chaos + checker, 0 failed
+  tasks); then the multi-arch Docker image, the 5-node compose cluster, and Docker chaos (LINEARIZABLE). DESIGN.md §5.
 - [ ] **6. Snapshots + log compaction** (InstallSnapshot, session table included). Rerun the full chaos suite.
 - [ ] **7. Benchmarks + failover + optimizations** (AppendEntries batching/pipelining, group-commit fsync; before/after).
   Sanity runs in Codespaces; give exact commands for the Oracle VM.
@@ -90,16 +90,18 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
-- Done: Phases 0–4.
-- Next: Phase 5 (gRPC transport, Docker 5-node cluster, Docker-level chaos). Waiting for the user to say "continue".
-- Phase 5 reminders:
-  - GATE first: an in-process test with 5 nodes, real threads (one single-threaded executor per node) and the
-    real gRPC transport. All gRPC callbacks and timers are posted onto the node's executor (decision 2).
-  - `KvClient` is single-threaded: the gRPC `ClientTransport` must post replies onto the client's executor.
-  - Docker chaos reuses the same checker; histories there use wall-clock time (no event counter), so equal
-    timestamps are treated as concurrent (already supported).
-- Resume number so far: **500 / 500 chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=500`, commit 39e1934,
-  Codespace 2-core AMD EPYC 7763), report `reports/chaos/chaos-baseline-500-seeds.md`. Rerun after Phase 6.
+- Done: Phases 0–5.
+- Next: Phase 6 (snapshots + log compaction via InstallSnapshot; session table included). Waiting for "continue".
+- Phase 6 reminders:
+  - Before discarding a log prefix, the B-Tree must be durable (checkpoint) up to the snapshot index
+    (DESIGN.md §1.5); the Raft log needs a `Wal` rewrite (tmp + rename) for compaction.
+  - InstallSnapshot RPC: raft.proto already defines it; add it to `Transport`, `RaftRpcHandler`, `SimNetwork`,
+    `GrpcRaftTransport`, `RaftGrpcService`. Snapshot = the B-Tree contents (data + session rows) + applied index.
+  - Then rerun the full chaos suite (`./gradlew chaos -Pruns=500`) and the Docker chaos.
+- Resume numbers so far (Codespace, 2-core AMD EPYC 7763):
+  - **500 / 500 simulated chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=500`, commit 39e1934).
+  - Docker chaos: 180 s, 6,455 ops, 19 kills / 26 pauses / 10 disconnects, LINEARIZABLE
+    (`scripts/docker-chaos.sh 180`, commit 3efea60).
 
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
@@ -150,6 +152,18 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   answer are left out.
 - Never raise the checker timeout to hide an INCONCLUSIVE run: tell the user and shrink the history instead.
 
+## Runtime + Docker map (Phase 5)
+- `common`: `ExecutorScheduler` (one thread per node; `checkThread`; failed-task counter; `close` waits).
+- `server`: `RaftKvNode` (wires everything; `crash()` for tests), `GrpcRaftTransport` (async stubs, deadline per
+  call, one channel per peer, replies posted; test hooks `setBlockedPeers`, `dropConnections`), `RaftGrpcService`,
+  `KvGrpcService` (post to the node thread), `FailureCountingInterceptor`, `StatusServer` (/status JSON), `NodeConfig`
+  (env: NODE_ID, CLUSTER, GRPC_PORT, STATUS_PORT, DATA_DIR), `Main`.
+- `client`: `GrpcClientTransport`, `BlockingKvClient`. `chaos`: `BlockingWorkload`, `DockerChaosMain`.
+- Rules: every entry point calls `checkThread()`; never block the node thread on the network; tests require
+  `failedTasks() == 0`.
+- Docker: build stage on `$BUILDPLATFORM`, runtime stage has NO `RUN` (keep it that way: no QEMU). Base images
+  pinned by digest. Compose project name `raftkv`; containers `raftkv-nodeN-1`; network `raftkv_default`.
+
 ## Commands
 - Build + all tests: `./gradlew build`
 - One module's tests: `./gradlew :storage:test`
@@ -158,3 +172,5 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - Chaos suite: `./gradlew chaos -Pruns=500` (report in `reports/chaos/`); replay one seed:
   `./gradlew chaos -Pruns=1 -PstartSeed=<seed> -Pverbose` (prints the fault log and, if it failed, the witness)
 - Mutation runs: `scripts/chaos-mutation.sh <reads-without-readindex|no-session-dedup|follower-reads> 500`
+- Docker image: `scripts/docker-build.sh` (multi-arch verify + load; ~4.5 min cold) or `scripts/docker-build.sh --local`
+- Docker cluster: `docker compose -p raftkv up -d`; Docker chaos: `scripts/docker-chaos.sh 180`

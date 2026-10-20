@@ -555,6 +555,129 @@ not done it, so the published numbers come from the configuration above.
 - CI runs `./gradlew build` (all unit and simulation tests) and `./gradlew chaos -Pruns=50` on
   every push.
 
+## 5. Production runtime: threads, gRPC, Docker (`server/`, `common/`, Docker files)
+
+### 5.1 Threading model
+- **One thread per node.** Each node has exactly one `ExecutorScheduler` thread, which owns all
+  Raft and KV state.
+  - Everything is *posted* onto it: gRPC request handlers (`RaftGrpcService`, `KvGrpcService`),
+    gRPC reply callbacks (`GrpcRaftTransport`), timers, and `/status` reads.
+  - So `RaftNode`, `KvService` and `KvStateMachine` need no locks, and the code is exactly the
+    code that runs single-threaded in the simulator.
+- **Thread confinement is asserted, not assumed.** `Scheduler.checkThread()` throws unless
+  called on the owning thread. It is called at every `RaftNode` entry point (12: start, stop,
+  propose, readIndex, both RPC handlers, both reply callbacks, the election timer, the heartbeat
+  timer, the ReadIndex round, status), at `KvService.get/put/delete`, and at `KvClient`'s entry
+  points. The simulator's scheduler enforces the same rule (the thread that created the
+  simulation). The checks are always on, in tests and in production.
+- **Failures are counted, so they are loud.**
+  - `ExecutorScheduler` counts tasks that threw. `FailureCountingInterceptor` counts gRPC
+    handlers that threw: gRPC would otherwise turn an exception on its own thread into an error
+    reply that the client quietly retries.
+  - `RaftKvNode.failedTasks()` sums both, and the tests require 0.
+  - **Shown to work.** I made `KvGrpcService.get` call the service on the gRPC thread instead
+    of posting. The in-process chaos test failed with `a task on node 1 threw ==> expected: <0>
+    but was: <4>`.
+  - The checker alone would **not** have caught that bug: the failed reads timed out, were left
+    out of the history, and the run was still LINEARIZABLE. The confinement assertions catch a
+    class of bug that linearizability checking cannot see.
+- **`ExecutorScheduler.close()` waits for the thread to stop.** A crashed-and-restarted node
+  can never have two incarnations writing the same files.
+
+### 5.2 gRPC rules
+- **Async stubs only.** A send returns immediately, and the node thread never blocks on the
+  network. The one blocking call in the system is on *client* threads, in `BlockingKvClient`.
+- **A deadline on every RPC:** 300–500 ms for Raft RPCs (`rpcTimeoutMs`), and the client's
+  attempt timeout for KV calls.
+  - It is set per call on a fresh stub (stubs are cheap) over a shared channel.
+  - A failed or expired call produces no callback: Raft retries by itself (heartbeats resend,
+    candidates time out), and `KvClient`'s attempt timer moves on.
+- **One channel per peer**, created on first use and reused for every call. gRPC multiplexes
+  calls over HTTP/2 and reconnects by itself.
+- **One port per node** serves both `RaftService` and `KvService`. `/status` is a separate HTTP
+  port (JDK `HttpServer`), and it reads the state on the node thread.
+
+### 5.3 The gate: 5 real nodes, real threads, real gRPC (`GrpcClusterTest`)
+- **Setup.** Five `RaftKvNode`s in one JVM on localhost, each with its own executor thread and
+  its own data directory on real disk. Four client threads use `BlockingKvClient`.
+- **Faults** (one every 300–700 ms):
+  - crash a node (gRPC server killed, executor stopped, files not closed) and restart it from
+    its data directory;
+  - isolate a node (both directions, filtered in the gRPC layer);
+  - kill all live connections of a node (in-flight calls fail, and the next call reconnects).
+- **Histories use `System.nanoTime`**; equal readings count as concurrent.
+- **Result:** LINEARIZABLE. The run before the gate commit saw 600 operations (597 completed),
+  4 crashes, 6 isolations and 6 connection drops, with 0 failed tasks. The test asserts every
+  fault type happened, that more than 200 operations completed, and that no node task failed.
+- **What it can catch that the simulator cannot:** races between gRPC threads and node threads,
+  missing hand-offs, executor lifecycle bugs, and real socket behavior.
+
+### 5.4 Docker image (`Dockerfile`)
+- **Build stage on `$BUILDPLATFORM`.** Gradle, javac and protoc run **once, natively**, even
+  for arm64. Java bytecode and the gRPC jars (which bundle native transports for both
+  architectures) are architecture-independent.
+- **Runtime stage per architecture** (`eclipse-temurin:21-jre`) **only copies files**: no
+  `RUN`, so nothing executes under QEMU. The multi-arch build log confirms 10 build-stage steps
+  for amd64, 0 for arm64, and 0 `RUN` steps on arm64.
+- **Measured build times** on the 2-core Codespace:
+  - first multi-arch build (amd64 + arm64), cold caches: **4 m 23 s** (Gradle inside: 3 m 6 s);
+  - rebuild after a source change, warm Gradle cache mount: **38–48 s**.
+- **Base images are pinned by multi-arch digest**, so rebuilds are reproducible.
+- **Runtime details.**
+  - It runs as uid 1000. `/data` is a volume owned by that user, copied from the build stage so
+    the final stage needs no `RUN`.
+  - The health check is `curl -fsS http://localhost:8080/status` (curl ships in the base image).
+  - The JVM gets `-Xmx256m` plus caps on metaspace (64 MB), direct memory (32 MB, used by
+    Netty) and the code cache (32 MB). `SerialGC` suits a small heap on 2 cores, and the
+    process exits on OOM rather than limping along.
+- **`docker stop`** sends SIGTERM to the JVM (PID 1, through `exec` in the start script). The
+  shutdown hook checkpoints the B-Tree and closes cleanly. **`docker kill`** is SIGKILL.
+
+### 5.5 The 5-node cluster (`docker-compose.yml`)
+- **Per node:** a 384 MB memory limit, a named volume `nodeN-data:/data`, a health check, and
+  `restart: unless-stopped`.
+- **Ports.** gRPC 7001–7005 and `/status` 8081–8085 are published on the host.
+  `CLUSTER=1=node1:7000,...` uses compose DNS names between containers. Leader hints carry node
+  ids, so host-side clients map them to their own `localhost` addresses.
+- **Memory, measured with `docker stats`:**
+  - about 77–90 MiB per container idle;
+  - a peak of **103–132 MiB per container** during the 180 s chaos run (limit 384 MiB);
+  - 5 containers at peak use under 600 MiB in total;
+  - with the cluster, Gradle and the IDE all running, the Codespace still had about 2.7 GB
+    available.
+- **Recovery from the volume, observed.** After `docker kill` and restart, node logs show
+  e.g. `replayed 818 WAL records ... event=started ... applied_index=818`: the node resumed from
+  its own disk, not from an empty state.
+
+### 5.6 Docker-level chaos (`scripts/docker-chaos.sh`, `DockerChaosMain`)
+- **Setup.** Four client threads on the host run the same `BlockingWorkload` as the in-process
+  test against the published ports. A fault fires every 1–3 s, each undone 2–5 s later, with at
+  most two nodes faulty at once.
+- **The three faults:**
+  - **`docker kill`** (SIGKILL), then `docker start`: a process crash; the node recovers from
+    its volume.
+  - **`docker pause` / `unpause`**: freezes the process, like a very long GC pause. A paused
+    leader wakes up deposed without knowing it: exactly the case ReadIndex protects against.
+  - **`docker network disconnect` / `connect`**: cuts the node off from peers *and* clients
+    (published ports go through that network).
+- **Result** (`reports/chaos/docker-chaos-180s.md`, commit `3efea60`): **LINEARIZABLE**.
+  6,455 operations (6,430 completed, 13 pending writes, 12 reads left out), 19 kills, 26
+  pauses, 10 disconnects, peak 132 MiB per container. The check took 138 ms.
+- **Honesty about what `docker kill` tests.** `docker kill` is a **process crash, not a power
+  loss**. The host keeps running, so its page cache, holding writes the process made but never
+  fsynced, survives and reaches the disk later. The B-Tree's lazily synced tail therefore always
+  survives a `docker kill`; the 818 replayed records above include un-fsynced ones.
+  - Power loss, where un-fsynced writes are lost, torn or reordered, is covered by the
+    simulator: `SimulatedFileSystem.simulatePowerLoss` in the storage recovery tests and in
+    every simulated crash in the Raft, KV and chaos suites (§1.6, §2, §4).
+  - Testing real power loss would need a VM or a fault-injecting block device.
+
+### 5.7 Observed cost of no PreVote
+Under Docker chaos, every paused or disconnected node keeps timing out and starting elections.
+The term reached **236** in a 60 s run (and 14 by the time a freshly started cluster was healthy,
+while containers came up one by one). Each rejoin with a higher term forces a new election. That
+is safe, but it is the availability cost listed in §6, now measured.
+
 ## 6. Known limitations
 - **No PreVote and no CheckQuorum.**
   - A node that was partitioned away keeps timing out and incrementing its term. When it
@@ -566,7 +689,12 @@ not done it, so the published numbers come from the configuration above.
     believing it leads. That is also safe: it cannot commit writes, and ReadIndex refuses to
     serve reads without a confirming majority. Clients talking to it see timeouts until they
     try another node.
-  - PreVote (Raft thesis §9.6) would fix the first issue, CheckQuorum (§6.2) the second.
+  - PreVote (Raft thesis §9.6) would fix the first issue, CheckQuorum (thesis §6.2) the second.
+  - Measured under Docker chaos: the term reached 236 in 60 s (§5.7).
+- **Simulated partitions in the in-process test are filtered in the gRPC layer**, not at the
+  network. Docker chaos uses real network disconnects.
+- **`docker kill` is a process crash, not a power loss** (§5.6); power loss is covered only by
+  the simulator.
 - **Session rows are never evicted.** Every client that ever wrote keeps an 18-byte row
   forever. Long-lived deployments with many short-lived clients would need expiry, and expiry
   must be decided *in the log* (for example a leader-proposed "expire sessions older than log
@@ -579,5 +707,4 @@ not done it, so the published numbers come from the configuration above.
 - **Deletes don't reclaim B-Tree space** (§1.3).
 
 ## To be written
-- The gRPC transport and production threading model (Phase 5), snapshots (Phase 6), and
-  performance (Phase 7).
+- Snapshots and log compaction (Phase 6) and performance (Phase 7).
