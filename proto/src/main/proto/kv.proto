@@ -1,0 +1,89 @@
+// Client-facing key-value API plus the command format stored in Raft log entries.
+syntax = "proto3";
+
+package raftkv.kv;
+
+option java_package = "io.github.hard3007.raftkv.proto.kv";
+option java_multiple_files = true;
+
+service KvService {
+  rpc Get(GetRequest) returns (GetReply);
+  rpc Put(PutRequest) returns (PutReply);
+  rpc Delete(DeleteRequest) returns (DeleteReply);
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  OK = 1;
+  // This node is not the leader. The client should retry at leader_hint
+  // (if set) or try another node.
+  NOT_LEADER = 2;
+  // The leader could not commit or confirm the request in time. The outcome
+  // is unknown for writes: the client must retry with the SAME sequence number.
+  TIMEOUT = 3;
+}
+
+// Present on every reply so a client can follow redirects.
+message LeaderHint {
+  int32 leader_id = 1;       // 0 means unknown
+  string leader_address = 2; // host:port of the leader's KvService, empty if unknown
+}
+
+// Reads carry no session: they do not modify state, so retrying is harmless.
+// They are served via ReadIndex on the leader.
+message GetRequest {
+  bytes key = 1;
+}
+
+message GetReply {
+  Status status = 1;
+  LeaderHint leader_hint = 2;
+  bool found = 3;
+  bytes value = 4;
+}
+
+// Writes carry (client_id, sequence) for exactly-once semantics: a retry
+// reuses the same sequence, and the state machine returns the cached reply
+// instead of applying the write twice.
+message PutRequest {
+  int64 client_id = 1;
+  int64 sequence = 2;
+  bytes key = 3;
+  bytes value = 4;
+}
+
+message PutReply {
+  Status status = 1;
+  LeaderHint leader_hint = 2;
+}
+
+message DeleteRequest {
+  int64 client_id = 1;
+  int64 sequence = 2;
+  bytes key = 3;
+}
+
+message DeleteReply {
+  Status status = 1;
+  LeaderHint leader_hint = 2;
+  bool existed = 3;          // true if the key was present when the delete applied
+}
+
+// The payload of a COMMAND log entry (raft.LogEntry.command).
+message KvCommand {
+  int64 client_id = 1;
+  int64 sequence = 2;
+  oneof op {
+    PutOp put = 3;
+    DeleteOp delete = 4;
+  }
+}
+
+message PutOp {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message DeleteOp {
+  bytes key = 1;
+}

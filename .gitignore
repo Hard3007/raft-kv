@@ -1,0 +1,10 @@
+.gradle/
+build/
+buildSrc/.kotlin/
+.kotlin/
+*.class
+*.log
+data/
+.idea/
+*.iml
+.vscode/

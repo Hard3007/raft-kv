@@ -1,0 +1,77 @@
+// Raft peer-to-peer RPCs, following Figure 2 (RequestVote, AppendEntries) and
+// Figure 13 (InstallSnapshot) of "In Search of an Understandable Consensus
+// Algorithm (Extended Version)", Ongaro and Ousterhout.
+syntax = "proto3";
+
+package raftkv.raft;
+
+option java_package = "io.github.hard3007.raftkv.proto.raft";
+option java_multiple_files = true;
+
+service RaftService {
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteReply);
+  rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesReply);
+  rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotReply);
+}
+
+enum EntryType {
+  ENTRY_TYPE_UNSPECIFIED = 0;
+  // Appended by every new leader for its own term (Raft 5.4.2 and section 8),
+  // so it can commit something in its term and start serving ReadIndex reads.
+  NOOP = 1;
+  // An opaque state-machine command (a serialized kv.KvCommand).
+  COMMAND = 2;
+}
+
+message LogEntry {
+  int64 term = 1;
+  int64 index = 2;
+  EntryType type = 3;
+  bytes command = 4;
+}
+
+message RequestVoteRequest {
+  int64 term = 1;            // candidate's term
+  int32 candidate_id = 2;    // candidate requesting vote
+  int64 last_log_index = 3;  // index of candidate's last log entry
+  int64 last_log_term = 4;   // term of candidate's last log entry
+}
+
+message RequestVoteReply {
+  int64 term = 1;            // currentTerm, for candidate to update itself
+  bool vote_granted = 2;     // true means candidate received vote
+}
+
+message AppendEntriesRequest {
+  int64 term = 1;                 // leader's term
+  int32 leader_id = 2;            // so follower can redirect clients
+  int64 prev_log_index = 3;       // index of log entry immediately preceding new ones
+  int64 prev_log_term = 4;        // term of prev_log_index entry
+  repeated LogEntry entries = 5;  // log entries to store (empty for heartbeat)
+  int64 leader_commit = 6;        // leader's commitIndex
+}
+
+message AppendEntriesReply {
+  int64 term = 1;                 // currentTerm, for leader to update itself
+  bool success = 2;               // true if follower contained entry matching prev_log_index/prev_log_term
+  // Fast log backtracking (not in Figure 2; see the end of section 5.3 and the
+  // MIT 6.5840 guidance). Only meaningful when success == false.
+  // conflict_term == 0 means the follower's log is too short; the leader should
+  // retry from conflict_index (the follower's last index + 1).
+  int64 conflict_term = 3;
+  int64 conflict_index = 4;
+}
+
+message InstallSnapshotRequest {
+  int64 term = 1;                 // leader's term
+  int32 leader_id = 2;            // so follower can redirect clients
+  int64 last_included_index = 3;  // the snapshot replaces all entries up through and including this index
+  int64 last_included_term = 4;   // term of last_included_index
+  int64 offset = 5;               // byte offset where chunk is positioned in the snapshot file
+  bytes data = 6;                 // raw bytes of the snapshot chunk, starting at offset
+  bool done = 7;                  // true if this is the last chunk
+}
+
+message InstallSnapshotReply {
+  int64 term = 1;                 // currentTerm, for leader to update itself
+}
