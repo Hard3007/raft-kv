@@ -1,21 +1,21 @@
 # Chaos report: mutation-compact-before-snapshot
 
 - **Command:** `./gradlew chaos -Pruns=500 -Plabel=mutation-compact-before-snapshot`
-- **Date:** 2026-10-20T09:42:31.863921015Z
-- **Git commit:** 1c764a9 (with uncommitted changes)
+- **Date:** 2026-10-20T09:52:42.163647321Z
+- **Git commit:** 61dda62 (with uncommitted changes)
 - **Machine:** Linux 6.8.0-1064-azure amd64, 2 cores (AMD EPYC 7763 64-Core Processor), Java 21, max heap 1024 MB
 - **Config:** 5 nodes, 5 clients, 3 keys, 60 ops per client, think time 0-300 ms, a fault action every 100-400 ms (virtual), client attempt timeout 1000 ms / give-up 4000 ms, checker timeout 10 s (wall); PreVote on, CheckQuorum on, a snapshot every 20 entries in 64-byte InstallSnapshot chunks
 - **Seeds:** 1..500 (500 runs)
-- **Total wall time:** 12.3 s
+- **Total wall time:** 13.3 s
 
 ## Verdicts
 
 | Verdict | Runs |
 |---|---|
-| LINEARIZABLE | 435 |
+| LINEARIZABLE | 418 |
 | NOT_LINEARIZABLE | 0 |
 | INCONCLUSIVE | 0 |
-| runs where the system failed an internal check | 65 |
+| runs where the system failed an internal check | 82 |
 
 Only LINEARIZABLE runs count as passing. INCONCLUSIVE means the checker ran out of time. An internal-check failure (a safety assertion, or a node refusing to start because committed entries were lost) has no verdict and does not pass either.
 
@@ -24,90 +24,108 @@ Only LINEARIZABLE runs count as passing. INCONCLUSIVE means the checker ran out 
 | Measure | Min | Mean | Max |
 |---|---|---|---|
 | operations | 300 | 300.0 | 300 |
-| completed operations | 197 | 254.0 | 291 |
-| pending writes (unknown outcome) | 4 | 23.3 | 62 |
-| reads left out (no definite answer) | 5 | 22.7 | 52 |
-| node crashes (power loss) | 13 | 29.2 | 49 |
-|   of which mid-I/O (crash at a random write/fsync/rename) | 4 | 14.8 | 30 |
-| partitions | 27 | 67.8 | 123 |
-| message-loss periods | 8 | 21.0 | 46 |
-| messages lost | 155 | 441.2 | 747 |
-| long-delay periods | 9 | 21.0 | 40 |
-| snapshots taken (all nodes) | 22 | 29.6 | 39 |
-| InstallSnapshots completed (all nodes) | 6 | 11.9 | 18 |
-| final term (highest across nodes) | 24 | 61.0 | 105 |
-| virtual time (s) | 37.4 | 84.5 | 139.5 |
-| wall time (ms) | 12 | 52.3 | 1551 |
+| completed operations | 193 | 240.5 | 289 |
+| pending writes (unknown outcome) | 6 | 30.4 | 59 |
+| reads left out (no definite answer) | 5 | 29.1 | 64 |
+| node crashes (power loss) | 13 | 30.3 | 46 |
+|   of which mid-I/O (crash at a random write/fsync/rename) | 4 | 15.5 | 29 |
+| node pauses (frozen 0.5-2 s) | 7 | 28.4 | 47 |
+| partitions | 16 | 66.3 | 110 |
+| message-loss periods | 9 | 21.8 | 35 |
+| messages lost | 140 | 465.9 | 918 |
+| long-delay periods | 9 | 21.6 | 38 |
+| snapshots taken (all nodes) | 22 | 29.3 | 39 |
+| InstallSnapshots completed (all nodes) | 4 | 11.5 | 19 |
+| final term (highest across nodes) | 16 | 65.9 | 107 |
+| virtual time (s) | 38.2 | 97.8 | 152.6 |
+| wall time (ms) | 14 | 57.6 | 1365 |
 
 ## Runs that did not pass
 
 | Seed | Verdict | Key / failure | Ops on key | Reproduce |
 |---|---|---|---|---|
-| 8 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 41 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=8 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 16 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 201 but the state only covers 182: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=16 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 32 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 100 but the state only covers 85: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=32 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 42 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 161 but the state only covers 143: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=42 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 50 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 161 but the state only covers 142: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=50 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 78 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 42 but the state only covers 41: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=78 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 85 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 82 but the state only covers 81: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=85 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 97 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=97 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 103 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 61 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=103 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 111 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 47: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=111 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 115 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 41 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=115 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 118 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 161 but the state only covers 144: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=118 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 123 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 101 but the state only covers 85: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=123 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 125 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 127 but the state only covers 121: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=125 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 133 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 82 but the state only covers 80: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=133 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 135 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 20 but the state only covers 2: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=135 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 136 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 80 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=136 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 140 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 120 but the state only covers 102: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=140 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 143 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 61 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=143 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 150 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 126 but the state only covers 107: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=150 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 151 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=151 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 152 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 101 but the state only covers 90: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=152 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 154 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 181 but the state only covers 162: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=154 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 159 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 160 but the state only covers 143: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=159 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 169 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 183 but the state only covers 182: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=169 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 182 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 102 but the state only covers 84: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=182 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 184 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 160 but the state only covers 141: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=184 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 191 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 80 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=191 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 195 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 182 but the state only covers 168: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=195 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 200 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=200 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 216 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 21: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=216 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 234 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 162 but the state only covers 161: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=234 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 252 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 102 but the state only covers 101: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=252 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 265 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 43: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=265 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 269 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 80 but the state only covers 63: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=269 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 273 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 42 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=273 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 278 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 187 but the state only covers 169: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=278 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 287 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 121 but the state only covers 103: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=287 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 305 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 81 but the state only covers 64: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=305 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 310 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 41 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=310 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 311 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 120 but the state only covers 102: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=311 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 326 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=326 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 330 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 42: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=330 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 332 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 100 but the state only covers 81: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=332 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 333 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 124 but the state only covers 122: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=333 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 334 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 147 but the state only covers 145: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=334 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 358 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 169 but the state only covers 164: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=358 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 360 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 142 but the state only covers 124: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=360 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 372 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 140 but the state only covers 123: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=372 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 380 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 121: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=380 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 382 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 62 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=382 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 401 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 21: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=401 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 402 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 20 but the state only covers 1: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=402 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 7 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 83 but the state only covers 81: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=7 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 8 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 61 but the state only covers 43: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=8 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 16 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 28: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=16 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 19 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 163 but the state only covers 145: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=19 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 30 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 22 but the state only covers 21: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=30 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 31 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 101 but the state only covers 90: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=31 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 44 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 103: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=44 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 47 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 160 but the state only covers 143: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=47 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 55 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 41 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=55 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 61 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=61 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 67 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 93 but the state only covers 84: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=67 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 72 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 164 but the state only covers 163: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=72 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 73 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=73 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 84 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 124 but the state only covers 123: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=84 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 86 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 163 but the state only covers 161: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=86 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 89 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 165 but the state only covers 164: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=89 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 92 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 83 but the state only covers 80: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=92 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 106 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 160 but the state only covers 142: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=106 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 117 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 21: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=117 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 122 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 62 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=122 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 123 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 68 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=123 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 124 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 101 but the state only covers 100: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=124 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 147 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=147 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 151 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 81 but the state only covers 63: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=151 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 164 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 183 but the state only covers 182: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=164 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 166 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 61 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=166 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 167 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 61 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=167 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 178 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 43: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=178 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 179 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 162 but the state only covers 161: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=179 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 187 | INTERNAL_FAILURE | java.util.NoSuchElementException: No value present | - | `./gradlew chaos -Pruns=1 -PstartSeed=187 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 197 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 43 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=197 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 203 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 65 but the state only covers 62: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=203 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 227 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 145 but the state only covers 144: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=227 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 234 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 21: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=234 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 246 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 81 but the state only covers 67: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=246 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 248 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 161 but the state only covers 145: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=248 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 265 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 81 but the state only covers 80: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=265 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 269 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 41: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=269 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 283 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 62 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=283 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 285 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 166 but the state only covers 161: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=285 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 294 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 142 but the state only covers 123: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=294 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 295 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 141 but the state only covers 140: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=295 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 317 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 62 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=317 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 323 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 102 but the state only covers 100: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=323 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 325 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 121: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=325 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 329 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 104: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=329 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 339 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 81 but the state only covers 62: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=339 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 340 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 161 but the state only covers 160: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=340 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 344 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 181 but the state only covers 163: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=344 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 345 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 148 but the state only covers 146: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=345 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 352 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 144 but the state only covers 143: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=352 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 354 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 61 but the state only covers 60: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=354 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 356 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 41 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=356 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 357 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 176 but the state only covers 174: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=357 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 361 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 24: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=361 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 362 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 121 but the state only covers 106: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=362 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 363 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 120 but the state only covers 101: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=363 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 369 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 44: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=369 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 372 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 42: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=372 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 382 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 43: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=382 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 384 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 182 but the state only covers 163: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=384 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 403 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 42: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=403 -Plabel=mutation-compact-before-snapshot -Pverbose` |
 | 415 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 20 but the state only covers 1: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=415 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 419 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 120: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=419 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 429 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 80 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=429 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 434 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 63 but the state only covers 61: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=434 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 441 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 80 but the state only covers 64: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=441 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 443 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 160 but the state only covers 141: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=443 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 450 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 121 but the state only covers 102: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=450 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 451 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 144 but the state only covers 129: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=451 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 454 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 120: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=454 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 455 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 42: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=455 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 490 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 181 but the state only covers 163: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=490 -Plabel=mutation-compact-before-snapshot -Pverbose` |
-| 495 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 161 but the state only covers 142: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=495 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 420 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 40 but the state only covers 21: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=420 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 421 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 141 but the state only covers 122: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=421 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 423 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 20 but the state only covers 1: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=423 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 425 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 143 but the state only covers 125: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=425 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 426 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 183 but the state only covers 165: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=426 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 433 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 121: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=433 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 437 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 181 but the state only covers 162: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=437 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 446 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 178 but the state only covers 162: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=446 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 447 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 140 but the state only covers 124: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=447 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 456 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 101 but the state only covers 88: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=456 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 473 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 60 but the state only covers 43: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=473 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 476 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 100 but the state only covers 84: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=476 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 485 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 183 but the state only covers 164: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=485 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 487 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 62 but the state only covers 45: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=487 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 490 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 146 but the state only covers 142: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=490 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 495 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 162 but the state only covers 144: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=495 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 496 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 41 but the state only covers 40: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=496 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 498 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 67 but the state only covers 52: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=498 -Plabel=mutation-compact-before-snapshot -Pverbose` |
+| 499 | INTERNAL_FAILURE | java.lang.IllegalStateException: log compacted through 122 but the state only covers 103: committed entries are lost | - | `./gradlew chaos -Pruns=1 -PstartSeed=499 -Plabel=mutation-compact-before-snapshot -Pverbose` |
 
 Per-seed numbers: `chaos-mutation-compact-before-snapshot-500-seeds.csv`.
 

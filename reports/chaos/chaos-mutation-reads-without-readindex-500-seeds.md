@@ -1,12 +1,12 @@
 # Chaos report: mutation-reads-without-readindex
 
 - **Command:** `./gradlew chaos -Pruns=500 -Plabel=mutation-reads-without-readindex`
-- **Date:** 2026-10-20T09:41:22.731325579Z
-- **Git commit:** 1c764a9 (with uncommitted changes)
+- **Date:** 2026-10-20T09:50:31.217929455Z
+- **Git commit:** 61dda62 (with uncommitted changes)
 - **Machine:** Linux 6.8.0-1064-azure amd64, 2 cores (AMD EPYC 7763 64-Core Processor), Java 21, max heap 1024 MB
 - **Config:** 5 nodes, 5 clients, 3 keys, 60 ops per client, think time 0-300 ms, a fault action every 100-400 ms (virtual), client attempt timeout 1000 ms / give-up 4000 ms, checker timeout 10 s (wall); PreVote on, CheckQuorum on, a snapshot every 20 entries in 64-byte InstallSnapshot chunks
 - **Seeds:** 1..500 (500 runs)
-- **Total wall time:** 12.8 s
+- **Total wall time:** 16.1 s
 
 ## Verdicts
 
@@ -24,27 +24,28 @@ Only LINEARIZABLE runs count as passing. INCONCLUSIVE means the checker ran out 
 | Measure | Min | Mean | Max |
 |---|---|---|---|
 | operations | 300 | 300.0 | 300 |
-| completed operations | 213 | 256.4 | 291 |
-| pending writes (unknown outcome) | 4 | 25.1 | 54 |
-| reads left out (no definite answer) | 3 | 18.6 | 42 |
-| node crashes (power loss) | 8 | 28.4 | 48 |
-|   of which mid-I/O (crash at a random write/fsync/rename) | 3 | 14.1 | 30 |
-| partitions | 24 | 65.1 | 112 |
-| message-loss periods | 5 | 20.2 | 37 |
-| messages lost | 141 | 429.5 | 757 |
-| long-delay periods | 6 | 19.7 | 41 |
-| snapshots taken (all nodes) | 20 | 29.0 | 38 |
-| InstallSnapshots completed (all nodes) | 4 | 11.6 | 18 |
-| final term (highest across nodes) | 17 | 58.4 | 105 |
-| virtual time (s) | 32.0 | 80.6 | 136.3 |
-| wall time (ms) | 13 | 50.4 | 1187 |
+| completed operations | 192 | 244.0 | 286 |
+| pending writes (unknown outcome) | 6 | 32.5 | 61 |
+| reads left out (no definite answer) | 3 | 23.5 | 49 |
+| node crashes (power loss) | 12 | 29.2 | 45 |
+|   of which mid-I/O (crash at a random write/fsync/rename) | 3 | 15.0 | 29 |
+| node pauses (frozen 0.5-2 s) | 9 | 27.5 | 50 |
+| partitions | 24 | 65.1 | 113 |
+| message-loss periods | 8 | 20.7 | 35 |
+| messages lost | 170 | 459.8 | 849 |
+| long-delay periods | 7 | 20.6 | 37 |
+| snapshots taken (all nodes) | 20 | 28.7 | 38 |
+| InstallSnapshots completed (all nodes) | 6 | 11.6 | 18 |
+| final term (highest across nodes) | 19 | 62.7 | 99 |
+| virtual time (s) | 41.3 | 93.7 | 140.7 |
+| wall time (ms) | 12 | 63.7 | 5184 |
 
 ## Runs that did not pass
 
 | Seed | Verdict | Key / failure | Ops on key | Reproduce |
 |---|---|---|---|---|
-| 42 | NOT_LINEARIZABLE | k1 | 103 | `./gradlew chaos -Pruns=1 -PstartSeed=42 -Plabel=mutation-reads-without-readindex -Pverbose` |
-| 174 | NOT_LINEARIZABLE | k0 | 115 | `./gradlew chaos -Pruns=1 -PstartSeed=174 -Plabel=mutation-reads-without-readindex -Pverbose` |
+| 164 | NOT_LINEARIZABLE | k1 | 92 | `./gradlew chaos -Pruns=1 -PstartSeed=164 -Plabel=mutation-reads-without-readindex -Pverbose` |
+| 428 | NOT_LINEARIZABLE | k2 | 85 | `./gradlew chaos -Pruns=1 -PstartSeed=428 -Plabel=mutation-reads-without-readindex -Pverbose` |
 
 Per-seed numbers: `chaos-mutation-reads-without-readindex-500-seeds.csv`.
 

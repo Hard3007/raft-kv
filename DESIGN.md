@@ -256,6 +256,8 @@ in-order apply on every apply) that every simulated-cluster test runs.
 | Beyond Figure 2: leader no-op (§5.4.2, §8) | `becomeLeader` | all cluster tests (each leader's first entry) |
 | Beyond Figure 2: PreVote (thesis §9.6) | `startPreVote`, `handlePreVote`, `onPreVoteReply`, `heardFromLeaderRecently` | `RaftPreVoteTest` (receiver rules, partitioned follower) |
 | Beyond Figure 2: CheckQuorum (thesis §6.2) | heartbeat timer, `heardFromMajorityRecently` | `RaftPreVoteTest.anIsolatedLeaderStepsDown` |
+| Figure 13: InstallSnapshot receiver, steps 1-8 (`[Fig13 n]`) | `handleInstallSnapshot`, `receiveSnapshotChunk`, `installSnapshot`; `SnapshotStore` | `KvSnapshotTest.*`, `SnapshotStoreTest.*` (§2.6) |
+| Figure 13: leader sends chunks; snapshot before compaction | `sendSnapshot`, `sendSnapshotChunk`, `onInstallSnapshotReply`, `maybeTakeSnapshot` | `KvSnapshotTest.laggingFollowerCatchesUpThroughInstallSnapshot`, `crashAtEveryIoStepOfSnapshotCreation` |
 
 ### 2.4 The lab-style tests
 These are modeled on the MIT 6.5840 Raft lab (3A–3C). Every one runs per seed:
@@ -305,6 +307,89 @@ reverted.
   in exactly that window. The randomized suites did not catch it in 200 seeds; the direct
   crash-and-restart unit tests catch it every time. Phase 4's chaos harness adds more crash
   points, but this rule is guarded by its unit tests.
+
+### 2.6 Snapshots and log compaction (Figure 13)
+**What a snapshot is.** The state machine's whole state after applying entry N (for the KV store:
+every B-Tree row, data and sessions), plus N and its term. `SnapshotStore` keeps the latest one
+in one file:
+`magic | version | lastIncludedIndex | lastIncludedTerm | length | crc32 | data`.
+
+**Taking one** (`RaftNode.maybeTakeSnapshot`, after applying): once `snapshotThreshold` entries
+(production: 10,000) have been applied since the last snapshot, three steps run **in this
+order**:
+1. **Save the snapshot durably:** write `raft.snapshot.tmp`, fsync, rename over
+   `raft.snapshot` (the directory is fsynced too).
+2. **Only then drop the prefix in memory:** `RaftLog` now starts after N and remembers only N and
+   its term, which is all AppendEntries' consistency check needs there.
+3. **Rewrite the WAL** (`Wal.rewrite`: temporary file, fsync, rename). The new file holds one
+   record: the compaction point, the term and vote, and the entries after N. **So the WAL file
+   stops growing**: `SnapshotStoreTest.compactionRewritesTheWalSoItStopsGrowing` shrinks it more
+   than 10×.
+
+A crash between steps 1 and 3 leaves an uncompacted log next to the snapshot, and restart
+finishes the job. The other order could lose committed entries.
+- **Mutation `compact-before-snapshot`** (steps 2–3 before step 1):
+  - `KvSnapshotTest.crashAtEveryIoStepOfSnapshotCreation` fails with `log compacted through 10
+    but the state only covers 1: committed entries are lost`.
+  - Chaos catches it in **82/500 seeds**, thanks to crashes at random I/O operations (§4.8).
+
+**Sending one** (leader, `sendSnapshot`). If a follower's `nextIndex` is at or below the leader's
+snapshot point, the entries it needs are gone, so the leader sends the snapshot file instead.
+- **Chunks** of `snapshotChunkBytes`: 256 KB in production, well under gRPC's 4 MB message
+  limit; tests and chaos use 64–512 B to force multi-chunk transfers.
+- **One chunk in flight.** If its reply has not arrived within two heartbeats, it is resent.
+- **The bytes come from memory**: an immutable copy of the snapshot file, so a newer snapshot
+  taken mid-transfer cannot corrupt it.
+- **matchIndex is never set from an InstallSnapshot reply.** Figure 13's reply carries only the
+  term, so it does not prove the follower installed anything (the transfer may have been damaged).
+  The leader only moves `nextIndex` past the snapshot; the next AppendEntries' consistency check
+  establishes `matchIndex`. If the install failed, that check fails and the transfer starts over.
+
+**Receiving one** (follower, `handleInstallSnapshot`, Figure 13 receiver steps 1–8, tagged
+`[Fig13 n]` in the code):
+1. Reply at once if term < currentTerm. From the current leader, reset the election timer.
+   Persist any term change before replying.
+2. Ignore snapshots that cover nothing new (index ≤ commitIndex).
+3. Write chunks to `raft.snapshot.recv`, in order only: offset 0 starts a new file, and a
+   duplicate or a gap is ignored.
+4. On the last chunk: fsync, **read the file back and check its CRC**, then rename it over the
+   snapshot. A damaged transfer is discarded and the old snapshot stays.
+5. If the log has an entry matching (lastIncludedIndex, lastIncludedTerm), keep the entries
+   after it. Otherwise discard the whole log.
+6. Rebuild the state machine from the snapshot (durable on return: §3.7), then rewrite the WAL.
+
+**AppendEntries after compaction.** A follower whose log starts after its snapshot may get
+AppendEntries with `prevLogIndex` below its snapshot point (a delayed message). Everything up to
+the snapshot point is committed, so it matches the leader's log; the follower skips that part
+and checks consistency at its snapshot point.
+
+**Restart** (`RaftNode` constructor):
+1. Load the snapshot.
+2. If the snapshot is newer than the log's compaction point (we crashed between saving and
+   compacting), compact or reset the log by the rules above and rewrite the WAL.
+3. If the state machine is behind the snapshot (its lazily synced B-Tree lost a tail),
+   restore it from the snapshot.
+4. Replay only the entries after `max(snapshot index, state machine's applied index)`.
+5. If the log was compacted past both the snapshot and the state, refuse to start: committed
+   entries are gone.
+
+| Failure scenario | Handling | Test |
+|---|---|---|
+| Crash at each of save()'s I/O steps | old snapshot or new, never a mix | `SnapshotStoreTest.crashAtEveryStepOfSaveLeavesTheOldOrTheNewSnapshot` |
+| A chunk lost in transit | CRC check fails; transfer discarded; leader retries | `SnapshotStoreTest.receivedChunksAreCheckedBeforeTheyReplaceTheSnapshot` |
+| Crash at each of the 14 I/O steps around taking a snapshot | every acknowledged write survives; the in-flight one completes once | `KvSnapshotTest.crashAtEveryIoStepOfSnapshotCreation` |
+| Crash at each of the 113 I/O steps of receiving and installing a snapshot | the follower restarts, catches up, ends identical to the leader | `KvSnapshotTest.crashAtEveryIoStepOfSnapshotInstallation` |
+| Crash at each step of a B-Tree restore | entirely old state or entirely new | `KvSnapshotTest.crashAtEveryStepOfRestoreLeavesTheOldOrTheNewState` |
+| A follower misses entries the leader has compacted away | multi-chunk InstallSnapshot, then AppendEntries | `KvSnapshotTest.laggingFollowerCatchesUpThroughInstallSnapshot` |
+| Restart after power loss | starts at the snapshot, replays only later entries | `KvSnapshotTest.restartStartsFromTheSnapshotAndReplaysOnlyLaterEntries` |
+| Snapshots over real gRPC with crashes | LINEARIZABLE; snapshots taken | `GrpcClusterTest.chaosOnRealThreadsIsLinearizable` (threshold 50, 512-byte chunks) |
+
+**Bug found while writing these tests (and fixed).** A single-node cluster committed and applied
+an entry *inside* `propose()`, before `KvService` had recorded the proposal. So the client never
+got its reply, and every write was retried, and committed again, until the client gave up.
+Multi-node clusters never hit it, because commit waits for a network round trip. Now a
+single-node commit runs on the next task. Regression test:
+`KvClusterTest.singleNodeClusterAnswersEachWriteOnce`, which fails without the fix.
 
 ## 3. Key-value service (`kv/`, `client/`)
 
@@ -430,6 +515,20 @@ timeout answers `UNKNOWN`.
   apply on every apply.
 - **Sweep results.** All KV tests pass at 500 seeds (3,008 runs).
 
+### 3.7 KV snapshots and restore (`KvStateMachine`)
+- **Format.** `takeSnapshot()` writes every row in key order:
+  `count | (keyLength | key | valueLength | value)*`. It includes the session rows, so
+  exactly-once survives a snapshot install: `snapshotRoundTripsEveryRowIncludingSessions` checks
+  that a retried write is still recognized as a duplicate.
+- **`restoreSnapshot` never modifies the live tree.**
+  1. Build generation g+1 (`kv-<g+1>.db/.wal`) from the snapshot, in batches, ending with
+     `setAppliedIndex(N)`.
+  2. Checkpoint and close it, so it is complete and durable on its own.
+  3. Atomically switch the pointer file `kv.current` to g+1 (temporary file, fsync, rename).
+  4. Reopen the tree and delete generation g.
+- **On open**, leftovers of an interrupted restore (g+1) or cleanup (g−1) are deleted. A crash at
+  any step leaves the pointer on a complete tree.
+
 ## 4. Linearizability checking and chaos testing (`linearizability/`, `chaos/`)
 
 ### 4.1 The checker (`LinearizabilityChecker`)
@@ -525,6 +624,9 @@ timeout answers `UNKNOWN`.
   witness.
 
 ### 4.5 Results
+The numbers in this section are from Phase 4 (commit `39e1934`). Those report files were later
+regenerated for Phase 6 (§4.8); the Phase 4 versions remain in git history (commit `1fd789c`).
+
 **Baseline:** `reports/chaos/chaos-baseline-500-seeds.md`, commit `39e1934`.
 - **500 / 500 LINEARIZABLE**, 0 NOT_LINEARIZABLE, 0 INCONCLUSIVE, 14.6 s wall time on the
   2-core Codespace.
@@ -570,6 +672,58 @@ not done it, so the published numbers come from the configuration above.
 - **The first fault schedule was too weak.** With faults every 200–1000 ms and little think
   time, runs ended in about 12 s of virtual time, and some seeds saw zero crashes or partitions.
   The schedule was densified until every seed sees at least 14 crashes and 37 partitions.
+
+### 4.8 Chaos after PreVote, CheckQuorum and snapshots
+**What changed in the harness:**
+- **Snapshots in every run.** A snapshot every 20 entries, in 64-byte InstallSnapshot chunks, so
+  snapshotting, multi-chunk transfers and compaction happen constantly.
+- **Crash at a random upcoming I/O operation** (new fault). The nemesis arms a node's disk to
+  fail at one of its next 0–30 writes, fsyncs or renames. The crash then lands *inside* an
+  operation: mid-append, mid-snapshot, mid-install. The harness catches it and power-cycles that
+  node. Before this, crashes only fell between simulated events, so chaos could not catch the
+  compact-before-snapshot bug at all.
+- **Pause** (new fault). A node is frozen for 0.5–2 s, like a GC pause or `docker pause`: its
+  timers are held, and so are messages for it. On resume, the held messages arrive in random
+  order, because nothing orders one connection relative to another, and overdue timers fire
+  5–25 ms later.
+- **Internal-check failures are reported per seed** instead of aborting the run. Examples: a
+  safety assertion, or a node refusing to start because committed entries are lost. Such runs
+  never pass.
+- **`-PcheckQuorum=false`** runs the same chaos without CheckQuorum.
+
+**Results** on commit `61dda62` (`reports/chaos/`), 500 seeds each:
+
+| Run | LINEARIZABLE | Caught | INCONCLUSIVE |
+|---|---|---|---|
+| **Baseline** (`./gradlew chaos -Pruns=500`) | **500** | 0 | 0 |
+| **Baseline, CheckQuorum off** | **500** | 0 | 0 |
+| Mutation: reads without ReadIndex confirmation | 498 | 2 | 0 |
+| Same mutation, CheckQuorum off | 450 | **50** | 0 |
+| Mutation: no session dedup | 263 | **236** | 1 |
+| Mutation: followers serve reads | 50 | **446** | 4 |
+| Mutation: compact before snapshot | 418 | **82** (internal failure) | 0 |
+
+**Per seed in the baseline:**
+- 13–49 crashes, of which 4–31 were mid-I/O;
+- 22–39 snapshots taken and **6–19 InstallSnapshots completed** (no seed had zero, so no extra
+  pressure was needed);
+- final term 24–108.
+
+**Why the ReadIndex mutation is now caught so rarely** (2/500, against 34/500 in Phase 4):
+- The bug only shows when a *deposed leader that does not know it* serves a read that starts
+  after a newer write finished elsewhere.
+- CheckQuorum now makes an isolated leader step down within about 300 ms.
+- A paused leader cannot be caught either. A client stuck on it is blocked: one operation at a
+  time, and it is waiting in the frozen node's buffer. So its only read was invoked before the
+  pause, it is concurrent with the newer write, and returning the old value is linearizable.
+- That is a real reduction in exposure, not a weaker checker. ReadIndex must be correct without
+  CheckQuorum's timing, and with CheckQuorum off the same mutation is caught in **50/500**. The
+  deterministic `KvClusterTest.deposedLeaderNeverServesAStaleRead` (CheckQuorum off) catches it
+  every time.
+
+**INCONCLUSIVE runs.** 5 in total, all in mutation suites (broken builds produce histories that
+are expensive to refute), none in either baseline. They never count as passes. The fix, if
+needed, is shorter histories for those suites, not a longer timeout.
 
 ### 4.7 Testing summary
 - Storage: §1.6.
@@ -733,7 +887,13 @@ elections happen in the same fault schedule.
   ids.
 - **Each read costs a heartbeat round to a majority** (no leader leases). A lease would save a
   round trip but would depend on bounded clock drift.
+- **Snapshots are taken synchronously on the node thread, and held in memory.** Serializing the state
+  blocks the node for that long, and a leader keeps the latest snapshot file in memory for sending.
+  That is fine for this store's small states; large states would need copy-on-write snapshots and
+  streaming the file from disk.
+- **The leader learns nothing from an InstallSnapshot reply** (Figure 13 has no success flag), so a
+  damaged transfer costs one failed AppendEntries before it restarts.
 - **Deletes don't reclaim B-Tree space** (§1.3).
 
 ## To be written
-- Snapshots and log compaction (Phase 6) and performance (Phase 7).
+- Performance (Phase 7).

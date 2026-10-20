@@ -85,25 +85,25 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   See DESIGN.md §4.
 - [x] **5. gRPC transport** — gate passed first (5 real nodes, real threads, real gRPC, chaos + checker, 0 failed
   tasks); then the multi-arch Docker image, the 5-node compose cluster, and Docker chaos (LINEARIZABLE). DESIGN.md §5.
-- [ ] **6. Snapshots + log compaction** (InstallSnapshot, session table included). Rerun the full chaos suite.
+- [x] **6. Snapshots + log compaction** — InstallSnapshot (Figure 13), WAL compaction, crash at every I/O step of
+  creation (14) and installation (113), compact-before-snapshot mutation caught; 500/500 chaos with snapshots. DESIGN.md §2.6.
 - [ ] **7. Benchmarks + failover + optimizations** (AppendEntries batching/pipelining, group-commit fsync; before/after).
   Sanity runs in Codespaces; give exact commands for the Oracle VM.
 - [ ] **8. Docs + deploy** — README, DESIGN.md, INTERVIEW_NOTES.md, DEPLOY.md, status page, Oracle deploy.
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
-- Done: Phases 0–5.
-- Next: Phase 6 (snapshots + log compaction via InstallSnapshot; session table included). Waiting for "continue".
-- Phase 6 reminders:
-  - Before discarding a log prefix, the B-Tree must be durable (checkpoint) up to the snapshot index
-    (DESIGN.md §1.5); the Raft log needs a `Wal` rewrite (tmp + rename) for compaction.
-  - InstallSnapshot RPC: raft.proto already defines it; add it to `Transport`, `RaftRpcHandler`, `SimNetwork`,
-    `GrpcRaftTransport`, `RaftGrpcService`. Snapshot = the B-Tree contents (data + session rows) + applied index.
-  - Then rerun the full chaos suite (`./gradlew chaos -Pruns=500`) and the Docker chaos.
+- Done: Phases 0–6, plus PreVote and CheckQuorum (between Phases 5 and 6).
+- Next: the final sweeps for Phase 6 (10,000-seed chaos, 180 s Docker chaos), then Phase 7 (benchmarks,
+  failover, AppendEntries batching/pipelining, group commit). Waiting for "continue" after the sweeps.
+- Phase 7 reminders:
+  - The Figure 8 tests must keep `maxEntriesPerAppend = 1` (DESIGN.md §2.5) when replication changes.
+  - Pipelining must never infer matchIndex from anything but a successful AppendEntries (§2.6 rule).
+  - Final resume numbers come only from the Oracle VM; Codespaces runs are labeled sanity checks.
 - Resume numbers so far (Codespace, 2-core AMD EPYC 7763):
-  - **500 / 500 simulated chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=500`, commit 39e1934).
-  - Docker chaos: 180 s, 6,455 ops, 19 kills / 26 pauses / 10 disconnects, LINEARIZABLE
-    (`scripts/docker-chaos.sh 180`, commit 3efea60).
+  - **500 / 500 simulated chaos runs LINEARIZABLE** with snapshots, mid-I/O crashes and pauses
+    (`./gradlew chaos -Pruns=500`, commit 61dda62). The 10,000-seed sweep replaces this.
+  - Docker chaos 180 s LINEARIZABLE (commit 3efea60; rerun after Phase 6 pending).
 
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
@@ -166,6 +166,19 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - Docker: build stage on `$BUILDPLATFORM`, runtime stage has NO `RUN` (keep it that way: no QEMU). Base images
   pinned by digest. Compose project name `raftkv`; containers `raftkv-nodeN-1`; network `raftkv_default`.
 
+## Snapshots map (Phase 6)
+- `raft`: `SnapshotStore` (file with CRC; save = tmp + fsync + rename; InstallSnapshot chunks -> `.recv` -> check ->
+  rename), owned by `RaftStorage` (`raft.snapshot` next to `raft.wal`). `RaftStorage.rewrite` = `Wal.rewrite`
+  (compaction). `RaftLog` has a base (snapshotIndex/Term). `RaftNode`: `maybeTakeSnapshot` (save BEFORE compact),
+  `sendSnapshot`/`onInstallSnapshotReply` (one chunk in flight; never set matchIndex from it),
+  `handleInstallSnapshot` (`[Fig13 n]` tags), restart reconciliation in the constructor.
+- `kv`: `KvStateMachine.open(fs, name, options, syncEvery)`; restore = new tree generation + atomic pointer
+  (`kv.current`). `StateMachine` has default `appliedIndex/takeSnapshot/restoreSnapshot`.
+- Config: `RaftConfig.snapshotThreshold` (0 = off; production 10,000 via `SNAPSHOT_THRESHOLD`),
+  `snapshotChunkBytes` (256 KB). Chaos: 20 entries, 64-byte chunks.
+- Chaos faults now include crash at a random upcoming I/O (`SimulatedFileSystem.crashAfter`) and pause
+  (`SimKvCluster.pause/resume`). `-PcheckQuorum=false` variant. Internal-check failures counted per seed.
+
 ## Commands
 - Build + all tests: `./gradlew build`
 - One module's tests: `./gradlew :storage:test`
@@ -173,6 +186,6 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - KV tests with N seeds each: `./gradlew :kv:test -PkvSeeds=50`
 - Chaos suite: `./gradlew chaos -Pruns=500` (report in `reports/chaos/`); replay one seed:
   `./gradlew chaos -Pruns=1 -PstartSeed=<seed> -Pverbose` (prints the fault log and, if it failed, the witness)
-- Mutation runs: `scripts/chaos-mutation.sh <reads-without-readindex|no-session-dedup|follower-reads> 500`
+- Mutation runs: `scripts/chaos-mutation.sh <reads-without-readindex|no-session-dedup|follower-reads|compact-before-snapshot> 500 [-PcheckQuorum=false]`
 - Docker image: `scripts/docker-build.sh` (multi-arch verify + load; ~4.5 min cold) or `scripts/docker-build.sh --local`
 - Docker cluster: `docker compose -p raftkv up -d`; Docker chaos: `scripts/docker-chaos.sh 180`
