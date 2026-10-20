@@ -93,6 +93,52 @@ class RaftScenarioTest {
     }
 
     /**
+     * Regression test for the bug found by Docker chaos. After {@code docker network disconnect}
+     * and {@code connect}, a container's old IP address was reused by another container, so a
+     * cached connection to node A actually reached node B. B answered, and the sender counted the
+     * answer as A's: one node's acknowledgement (or vote) counted twice.
+     *
+     * <p>Here the leader can reach only node B, plus a stale route on which traffic addressed to
+     * node A lands on B. The leader and B are 2 of 5 nodes, so nothing proposed now may commit.
+     * If replies are attributed to the addressee, the leader counts B twice, sees 3 of 5, and
+     * commits. The true majority (A, C, D) then elects a leader without that entry and puts a
+     * different one at the same index: a State Machine Safety violation, which the harness catches.
+     */
+    @ParameterizedTest(name = "seed {0}")
+    @MethodSource(SEEDS)
+    void aReplyFromTheWrongNodeIsNeverCountedAsTheAddressedPeer(long seed) {
+        RaftCluster cluster = new RaftCluster(5, seed).startAll();
+        int leader = cluster.checkOneLeader();
+        cluster.one(cluster.newCommand(), 5, true);
+        int b = cluster.after(leader, 1);
+        int a = cluster.after(leader, 2);
+        int c = cluster.after(leader, 3);
+        int d = cluster.after(leader, 4);
+
+        cluster.disconnect(a);
+        cluster.disconnect(c);
+        cluster.disconnect(d);
+        cluster.network.misdeliver(a, b); // the stale route: "node A" is really node B
+        long commitBefore = cluster.node(leader).status().commitIndex();
+        assertTrue(cluster.propose(leader, "on-two-nodes-only").isPresent());
+        cluster.sim.runFor(1_000);
+        assertEquals(commitBefore, cluster.node(leader).status().commitIndex(),
+                "committed with real acknowledgements from only 2 of 5 nodes");
+
+        // The real majority takes over; the uncommitted entry must simply disappear.
+        cluster.crash(leader);
+        cluster.crash(b);
+        cluster.network.stopMisdelivering();
+        cluster.connect(a);
+        cluster.connect(c);
+        cluster.connect(d);
+        cluster.one(cluster.newCommand(), 3, true);
+        cluster.restart(leader);
+        cluster.restart(b);
+        cluster.one(cluster.newCommand(), 5, true);
+    }
+
+    /**
      * Fast backtracking: a follower with 50 conflicting entries from one term is repaired in one
      * or two round trips, not fifty. Without conflictTerm/conflictIndex the leader would back up
      * one entry per rejected AppendEntries.

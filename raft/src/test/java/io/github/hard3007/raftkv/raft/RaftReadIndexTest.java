@@ -26,7 +26,7 @@ class RaftReadIndexTest {
 
     private record SentAppend(int peer, AppendEntriesRequest request, Consumer<AppendEntriesReply> onReply) {
         void answer(long term, boolean success) {
-            onReply.accept(AppendEntriesReply.newBuilder().setTerm(term).setSuccess(success).build());
+            onReply.accept(AppendEntriesReply.newBuilder().setTerm(term).setSuccess(success).setResponderId(peer).build());
         }
     }
 
@@ -83,7 +83,8 @@ class RaftReadIndexTest {
         sim.runFor(300); // the election timer (150-300 ms) fires once
         for (int peer : peers.subList(0, peers.size() / 2)) { // enough votes for a majority
             SentVote vote = lastVoteFrom(peer);
-            vote.onReply().accept(RequestVoteReply.newBuilder().setTerm(vote.request().getTerm()).setVoteGranted(true).build());
+            vote.onReply().accept(RequestVoteReply.newBuilder().setTerm(vote.request().getTerm()).setVoteGranted(true)
+                    .setResponderId(peer).build());
         }
         assertEquals(RaftNode.Role.LEADER, leader.status().role());
     }

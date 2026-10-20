@@ -28,7 +28,7 @@ import java.util.function.BooleanSupplier;
  * crash a node (power loss; at most two down at once), arm a crash at one of a node's next 0-30
  * I/O operations (so crashes also land mid-append, mid-snapshot, mid-install), restart a crashed
  * node, pause a node for 0.5-2 s (its timers and incoming messages are held, like a GC pause or
- * docker pause), isolate the
+ * docker pause), route one node's traffic to another for 0.5-2 s (a reused IP address), isolate the
  * leader together with some clients, split the cluster into a random minority and majority
  * (clients assigned to random sides), heal all partitions, toggle 10% message loss, and toggle
  * long delays (some messages delayed 0.2-2 s, which reorders them and makes clients retry while
@@ -42,7 +42,7 @@ final class ChaosRun {
 
     /** What one run did, for the report. */
     record Stats(int operations, int completed, int pendingWrites, int discardedReads, int crashes, int midIoCrashes,
-            int pauses, int partitions,
+            int pauses, int staleRoutes, int partitions,
             int lossPeriods, int longDelayPeriods, long messagesLost, long virtualMillis, long snapshotsTaken,
             long snapshotsInstalled, long finalTerm) {
     }
@@ -80,6 +80,8 @@ final class ChaosRun {
     private int crashes;
     private int midIoCrashes;
     private int pauses;
+    private int staleRoutes;
+    private boolean staleRouteActive;
     private final Set<Integer> pausedNodes = new HashSet<>();
     private final Set<Integer> armed = new HashSet<>();
     private int partitions;
@@ -128,7 +130,7 @@ final class ChaosRun {
         List<Operation> operations = history.operations();
         CheckResult check = new LinearizabilityChecker(config.checkerTimeout()).check(operations);
         Stats stats = new Stats(operations.size() + discardedReads, completed, pendingWrites, discardedReads, crashes,
-                midIoCrashes, pauses, partitions, lossPeriods, longDelayPeriods, cluster.network.messagesLost(), cluster.sim.now(),
+                midIoCrashes, pauses, staleRoutes, partitions, lossPeriods, longDelayPeriods, cluster.network.messagesLost(), cluster.sim.now(),
                 cluster.snapshotsTaken(), cluster.snapshotsInstalled(), highestTerm());
         return new Result(seed, check.verdict(), stats, check, faultLog, operations,
                 System.currentTimeMillis() - wallStart, null);
@@ -206,11 +208,12 @@ final class ChaosRun {
     }
 
     private void injectFault() {
-        switch (random.nextInt(9)) {
+        switch (random.nextInt(10)) {
             case 0 -> crashSomeNode();
             case 1 -> restartSomeNode();
             case 7 -> armCrashAtNextIo();
             case 8 -> pauseSomeNode();
+            case 9 -> staleRoute();
             case 2 -> isolateLeader();
             case 3 -> randomSplit();
             case 4 -> {
@@ -310,6 +313,31 @@ final class ChaosRun {
         }
     }
 
+    /**
+     * For 0.5-2 s, traffic addressed to one node reaches another (a cached connection to a reused
+     * IP address, as docker network disconnect/connect produced). The impostor answers for the
+     * addressee.
+     */
+    private void staleRoute() {
+        if (staleRouteActive) {
+            return;
+        }
+        int addressedTo = 1 + random.nextInt(config.nodes());
+        int actuallyTo = 1 + random.nextInt(config.nodes());
+        if (addressedTo == actuallyTo) {
+            return;
+        }
+        cluster.network.misdeliver(addressedTo, actuallyTo);
+        staleRouteActive = true;
+        staleRoutes++;
+        log("stale route: traffic for node " + addressedTo + " reaches node " + actuallyTo);
+        cluster.sim.schedule(500 + random.nextInt(1501), () -> {
+            cluster.network.stopMisdelivering();
+            staleRouteActive = false;
+            log("stale route cleared");
+        });
+    }
+
     /** Freezes a live node for 0.5-2 s (like a GC pause): it wakes up believing what it believed before. */
     private void pauseSomeNode() {
         int node = 1 + random.nextInt(config.nodes());
@@ -360,6 +388,8 @@ final class ChaosRun {
     }
 
     private void healEverything() {
+        cluster.network.stopMisdelivering();
+        staleRouteActive = false;
         for (int node : List.copyOf(pausedNodes)) {
             cluster.resume(node);
         }

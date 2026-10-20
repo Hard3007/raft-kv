@@ -150,6 +150,7 @@ public final class ChaosMain {
         row(md, "node crashes (power loss)", measured, r -> r.stats().crashes());
         row(md, "  of which mid-I/O (crash at a random write/fsync/rename)", measured, r -> r.stats().midIoCrashes());
         row(md, "node pauses (frozen 0.5-2 s)", measured, r -> r.stats().pauses());
+        row(md, "stale routes (one node's traffic reaches another)", measured, r -> r.stats().staleRoutes());
         row(md, "partitions", measured, r -> r.stats().partitions());
         row(md, "message-loss periods", measured, r -> r.stats().lossPeriods());
         row(md, "messages lost", measured, r -> r.stats().messagesLost());
@@ -195,7 +196,7 @@ public final class ChaosMain {
 
     private static void writeCsv(Path path, List<ChaosRun.Result> results) throws IOException {
         StringBuilder csv = new StringBuilder("seed,verdict,operations,completed,pending_writes,discarded_reads,"
-                + "crashes,mid_io_crashes,pauses,partitions,loss_periods,messages_lost,long_delay_periods,snapshots_taken,"
+                + "crashes,mid_io_crashes,pauses,stale_routes,partitions,loss_periods,messages_lost,long_delay_periods,snapshots_taken,"
                 + "snapshots_installed,final_term,virtual_ms,wall_ms\n");
         for (ChaosRun.Result r : results) {
             ChaosRun.Stats s = r.stats();
@@ -205,7 +206,7 @@ public final class ChaosMain {
             }
             csv.append(r.seed()).append(',').append(r.verdict()).append(',').append(s.operations()).append(',')
                     .append(s.completed()).append(',').append(s.pendingWrites()).append(',').append(s.discardedReads())
-                    .append(',').append(s.crashes()).append(',').append(s.midIoCrashes()).append(',').append(s.pauses()).append(',').append(s.partitions()).append(',')
+                    .append(',').append(s.crashes()).append(',').append(s.midIoCrashes()).append(',').append(s.pauses()).append(',').append(s.staleRoutes()).append(',').append(s.partitions()).append(',')
                     .append(s.lossPeriods()).append(',').append(s.messagesLost()).append(',')
                     .append(s.longDelayPeriods()).append(',').append(s.snapshotsTaken()).append(',')
                     .append(s.snapshotsInstalled()).append(',').append(s.finalTerm()).append(',')

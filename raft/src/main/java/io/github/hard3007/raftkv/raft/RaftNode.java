@@ -362,7 +362,7 @@ public final class RaftNode implements RaftRpcHandler {
         if (currentTerm != termBefore || votedFor != voteBefore) {
             persistTermAndVote();
         }
-        return RequestVoteReply.newBuilder().setTerm(currentTerm).setVoteGranted(granted).build();
+        return RequestVoteReply.newBuilder().setTerm(currentTerm).setVoteGranted(granted).setResponderId(id).build();
     }
 
     /**
@@ -376,7 +376,7 @@ public final class RaftNode implements RaftRpcHandler {
         boolean granted = request.getTerm() > currentTerm
                 && !heardFromLeaderRecently()
                 && candidateLogIsUpToDate(request.getLastLogTerm(), request.getLastLogIndex());
-        return RequestVoteReply.newBuilder().setTerm(currentTerm).setVoteGranted(granted).build();
+        return RequestVoteReply.newBuilder().setTerm(currentTerm).setVoteGranted(granted).setResponderId(id).build();
     }
 
     /** True if we are the leader, or accepted AppendEntries from one within the minimum election timeout. */
@@ -500,6 +500,7 @@ public final class RaftNode implements RaftRpcHandler {
 
     private AppendEntriesReply appendReply(boolean success, long conflictTerm, long conflictIndex) {
         return AppendEntriesReply.newBuilder()
+                .setResponderId(id)
                 .setTerm(currentTerm)
                 .setSuccess(success)
                 .setConflictTerm(conflictTerm)
@@ -569,6 +570,9 @@ public final class RaftNode implements RaftRpcHandler {
 
     private void onPreVoteReply(int peer, long round, RequestVoteReply reply) {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        if (reply.getResponderId() != peer) {
+            return; // answered by a different node than we asked (a stale route): never count it as that peer
+        }
         // [Fig2 All-2] A reply carrying a newer real term still means we are behind.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -622,6 +626,9 @@ public final class RaftNode implements RaftRpcHandler {
 
     private void onRequestVoteReply(int peer, long electionTerm, RequestVoteReply reply) {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        if (reply.getResponderId() != peer) {
+            return; // answered by a different node than we asked (a stale route): never count it as that peer
+        }
         // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -791,6 +798,9 @@ public final class RaftNode implements RaftRpcHandler {
 
     private void onAppendEntriesReply(int peer, AppendEntriesRequest request, long round, AppendEntriesReply reply) {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        if (reply.getResponderId() != peer) {
+            return; // answered by a different node than we asked (a stale route): never count it as that peer
+        }
         // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -929,6 +939,9 @@ public final class RaftNode implements RaftRpcHandler {
 
     private void onInstallSnapshotReply(int peer, InstallSnapshotRequest request, InstallSnapshotReply reply) {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        if (reply.getResponderId() != peer) {
+            return; // answered by a different node than we asked (a stale route): never count it as that peer
+        }
         // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -996,7 +1009,7 @@ public final class RaftNode implements RaftRpcHandler {
         if (fromCurrentLeader) {
             receiveSnapshotChunk(request);
         }
-        return InstallSnapshotReply.newBuilder().setTerm(currentTerm).build();
+        return InstallSnapshotReply.newBuilder().setTerm(currentTerm).setResponderId(id).build();
     }
 
     private void receiveSnapshotChunk(InstallSnapshotRequest request) {

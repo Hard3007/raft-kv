@@ -34,7 +34,13 @@ raftkv-node3-1=132.0, raftkv-node4-1=109.9, raftkv-node5-1=99.54} (limit 384MiB)
 Its node logs are in `docker-chaos-180s-phase6-run2-node-logs.txt.gz`. Its Markdown report was
 accidentally overwritten while renaming files; the numbers above are the captured console output.
 
-## Status
+## Status: explained and fixed
+
+Reproduced on commits 920f53e and d63b882 with witnesses and node logs; root cause: replies were
+counted as the addressed peer's although another node (reached through a reused IP address)
+sent them. Fixed by `responder_id` on every reply. See DESIGN.md §5.8.
+
+## Investigation log (kept as written at the time)
 
 A passing rerun does not explain run 1. Docker runs are not deterministic, so run 1 cannot be
 replayed. What has been ruled out so far:

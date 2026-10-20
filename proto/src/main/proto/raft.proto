@@ -43,6 +43,9 @@ message RequestVoteRequest {
 message RequestVoteReply {
   int64 term = 1;            // currentTerm, for candidate to update itself
   bool vote_granted = 2;     // true means candidate received vote
+  // Beyond Figure 2: who actually answered. The candidate counts the vote only if this is the
+  // peer it asked; a stale connection (e.g. a reused IP address) can reach a different node.
+  int32 responder_id = 3;
 }
 
 message AppendEntriesRequest {
@@ -63,6 +66,8 @@ message AppendEntriesReply {
   // retry from conflict_index (the follower's last index + 1).
   int64 conflict_term = 3;
   int64 conflict_index = 4;
+  // Beyond Figure 2: who actually answered (see RequestVoteReply.responder_id).
+  int32 responder_id = 5;
 }
 
 message InstallSnapshotRequest {
@@ -77,4 +82,5 @@ message InstallSnapshotRequest {
 
 message InstallSnapshotReply {
   int64 term = 1;                 // currentTerm, for leader to update itself
+  int32 responder_id = 2;         // beyond Figure 13: who actually answered
 }

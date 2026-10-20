@@ -10,6 +10,7 @@
 #   no-session-dedup          every copy of a write is applied (no exactly-once)
 #   follower-reads            followers answer reads from their own state machine
 #   compact-before-snapshot   the log prefix is discarded before the snapshot covering it is durable
+#   accept-misattributed-replies  replies are counted as the addressed peer's, whoever sent them
 #
 # The report goes to reports/chaos/chaos-mutation-<mutation>-<runs>-seeds.md.
 set -euo pipefail
@@ -33,6 +34,11 @@ case "$mutation" in
     file=raft/src/main/java/io/github/hard3007/raftkv/raft/RaftNode.java
     # Drop the log prefix (and rewrite the WAL) before the snapshot that covers it is durable.
     patch='s/        storage.snapshots\(\).save\(index, term, stateMachine.takeSnapshot\(\)\);\n        log.compactThrough\(index\);\n        storage.rewrite\((.*?)\);\n/        byte[] data = stateMachine.takeSnapshot();\n        log.compactThrough(index);\n        storage.rewrite($1);\n        storage.snapshots().save(index, term, data);\n/'
+    ;;
+  accept-misattributed-replies)
+    file=raft/src/main/java/io/github/hard3007/raftkv/raft/RaftNode.java
+    # Count a reply as the addressed peer's even when another node sent it (the Docker bug).
+    patch='s/        if \(reply.getResponderId\(\) != peer\) \{\n            return; [^\n]*\n        \}\n//g'
     ;;
   follower-reads)
     file=kv/src/main/java/io/github/hard3007/raftkv/kv/KvService.java

@@ -100,9 +100,10 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   - The Figure 8 tests must keep `maxEntriesPerAppend = 1` (DESIGN.md §2.5) when replication changes.
   - Pipelining must never infer matchIndex from anything but a successful AppendEntries (§2.6 rule).
   - Final resume numbers come only from the Oracle VM; Codespaces runs are labeled sanity checks.
-- **OPEN BUG (blocks the Docker claim):** 180 s Docker chaos on 43a3adb was NOT_LINEARIZABLE once (key k1); a rerun
-  passed. No witness was captured. See reports/chaos/docker-chaos-180s-phase6-notes.md. Next: reproduce with
-  the witness + node logs that DockerChaosMain and docker-chaos.sh now save, then explain and fix.
+- **FIXED: replies counted for the wrong node** (found by Docker chaos; DESIGN.md §5.8). Every Raft reply carries
+  `responder_id` and reply handlers drop replies from anyone but the peer asked. Chaos injects stale routes; the
+  `accept-misattributed-replies` mutation is caught. Never identify a peer by the connection a reply came on.
+- Final evidence must all come from ONE final commit: Raft gate, 10,000-seed sweep, five 180 s Docker runs.
 - Resume numbers so far (Codespace, 2-core AMD EPYC 7763):
   - **10,000 / 10,000 simulated chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=10000`, commit 43a3adb).
   - Docker chaos: LINEARIZABLE on 3efea60 (Phase 5); after Phase 6, one NOT_LINEARIZABLE run is OPEN (above).

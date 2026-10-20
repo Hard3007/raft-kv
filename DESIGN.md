@@ -726,12 +726,10 @@ not done it, so the published numbers come from the configuration above.
 failures. Every seed had at least 11 crashes (2 mid-I/O), 6 pauses, 16 partitions, 19 snapshots and 4
 InstallSnapshots.
 
-**Docker chaos after Phase 6: one unexplained violation (OPEN).** The first 180 s run on commit
-`43a3adb` (with `SNAPSHOT_THRESHOLD=200`) was **NOT_LINEARIZABLE** (key `k1`, 8,141 operations). A
-rerun was LINEARIZABLE, which does not explain the first. That run predates witness capture, so there is
-no witness; see `reports/chaos/docker-chaos-180s-phase6-notes.md` for everything known and what
-has been ruled out. **Until it is reproduced and explained, the system cannot be claimed
-linearizable under Docker-level faults.**
+**Docker chaos after Phase 6: a real violation, now explained and fixed** (§5.8). The first 180 s
+run on commit `43a3adb` was NOT_LINEARIZABLE. It was reproduced on `920f53e` and `d63b882` (with
+witness and node logs) and traced to replies being attributed to the wrong node. The simulator now
+injects that fault (the "stale route", above) in every run.
 
 **INCONCLUSIVE runs.** 5 in total, all in mutation suites (broken builds produce histories that
 are expensive to refute), none in either baseline. They never count as passes. The fix, if
@@ -875,6 +873,57 @@ after a 60 s Docker chaos run (`scripts/docker-chaos.sh 60`; random faults, so c
 An earlier run before PreVote had reached 236. With PreVote, the term only moves when an
 election is actually needed (a killed, paused or disconnected leader), so about 10× fewer
 elections happen in the same fault schedule.
+
+### 5.8 The bug Docker chaos found: replies counted for the wrong node
+**Symptom.** A 180 s Docker chaos run was NOT_LINEARIZABLE. The witness
+(`reports/chaos/docker-chaos-180s-920f53e-20261020T102536Z-violation.txt`) ends with a read of
+`k2` returning `c0-410`, a value overwritten many times by writes that had completed seconds
+earlier: a node served a state far in the past. The node logs showed the mechanism:
+- node 1 later recovered with applied index 879;
+- but node 5 had won term 6 with `last_log_index=800`.
+
+So a leader was elected without entries that were committed: Leader Completeness was violated.
+
+**Diagnosis.** I added an INFO trace for every vote granted and logged the votes each new leader
+had counted. The next reproduction (commit `d63b882`) showed that in 14 of 29 elections, the
+winner had counted a vote from a node that never granted one. In term 6, for example, node 1
+counted node 4, while the node that actually voted was node 5.
+
+**Root cause.**
+1. Raft replies did not say who sent them. The sender attributed each reply to the peer it had
+   *addressed*.
+2. `docker network disconnect`/`connect` gives a container a new IP address, and its old address
+   can later go to another container.
+3. A peer's cached gRPC connection to `nodeX:7000` could therefore reach a *different* node,
+   whose vote or acknowledgement was then counted twice.
+
+The result: elections won without a real majority of votes, and entries committed without a real
+majority of copies.
+- Only Docker hits this, because it reuses addresses.
+- The simulator and the localhost gRPC test never reuse addresses, which is why 10,000 simulated
+  seeds and the real-thread tests stayed clean.
+
+**Regression test (written before the fix).**
+`RaftScenarioTest.aReplyFromTheWrongNodeIsNeverCountedAsTheAddressedPeer`.
+- **Setup.** `SimNetwork.misdeliver(a, b)` makes traffic for node A reach node B. The leader can
+  then reach only B, plus "A" (which is really B): 2 of 5 nodes.
+- **On the old code** it failed 3/3 seeds with `committed with real acknowledgements from only 2
+  of 5 nodes`. Without that assertion, the harness then reports `State Machine Safety violated at
+  index 3`, which is the Docker symptom.
+
+**Fix.** Every reply carries `responder_id`, and every reply handler (votes, PreVotes,
+AppendEntries, InstallSnapshot) first drops a reply whose responder is not the peer it asked,
+before looking at anything else in it (even the term). A vote or acknowledgement now counts only
+for the node that actually gave it, whatever route it took.
+
+**Coverage from now on.**
+- Chaos injects a "stale route" fault in every run (§4.8).
+- The mutation `accept-misattributed-replies` (`scripts/chaos-mutation.sh`) removes the checks.
+  It is caught in **191/500** chaos seeds as an internal failure (a safety assertion).
+
+**Lesson.** A protocol that identifies peers by "the connection I used" rather than by what the
+message says it is trusts the network's addressing. Real networks, especially container
+networks, do not guarantee it.
 
 ## 6. Known limitations
 - **PreVote and CheckQuorum are implemented** (§2.2), so the earlier "no PreVote" limitation is

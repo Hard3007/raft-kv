@@ -64,6 +64,8 @@ public final class SimNetwork {
     private final Set<Integer> paused = new HashSet<>();
     /** Deliveries waiting for a paused node, in arrival order. */
     private final Map<Integer, List<Runnable>> held = new HashMap<>();
+    /** addressedTo -> actually delivered to, like a stale DNS entry or a reused IP address. */
+    private final Map<Integer, Integer> misdeliveries = new HashMap<>();
     private boolean unreliable;
     private boolean longDelays;
     private MessageFilter filter = (from, to, message) -> false;
@@ -161,6 +163,19 @@ public final class SimNetwork {
         }
     }
 
+    /**
+     * From now on, messages addressed to {@code addressedTo} reach {@code actuallyTo} instead, and
+     * its replies come back as if {@code addressedTo} had sent them. This is what a cached
+     * connection to a reused IP address does (seen with docker network disconnect/connect).
+     */
+    public void misdeliver(int addressedTo, int actuallyTo) {
+        misdeliveries.put(addressedTo, actuallyTo);
+    }
+
+    public void stopMisdelivering() {
+        misdeliveries.clear();
+    }
+
     /** Unreliable: each request and each reply is dropped with probability 10%. */
     public void setUnreliable(boolean unreliable) {
         this.unreliable = unreliable;
@@ -210,8 +225,9 @@ public final class SimNetwork {
      * and delivers the handler's reply back after another delay, unless something along the way
      * drops it. The handler is looked up on arrival because the target may have restarted since.
      */
-    public <Q, R> void call(int from, int to, Q request, IntFunction<AsyncHandler<Q, R>> handlerAt,
+    public <Q, R> void call(int from, int addressedTo, Q request, IntFunction<AsyncHandler<Q, R>> handlerAt,
             Consumer<R> onReply) {
+        int to = misdeliveries.getOrDefault(addressedTo, addressedTo);
         messagesSent++;
         long senderIncarnation = incarnations.get(from);
         if (!canTalk(from, to) || lost() || filter.drop(from, to, request)) {
