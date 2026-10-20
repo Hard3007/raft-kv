@@ -35,6 +35,9 @@ message RequestVoteRequest {
   int32 candidate_id = 2;    // candidate requesting vote
   int64 last_log_index = 3;  // index of candidate's last log entry
   int64 last_log_term = 4;   // term of candidate's last log entry
+  // PreVote (Raft thesis §9.6): "would you vote for me in term `term`?" Changes no state on
+  // either side. A node only starts a real election after a majority says yes.
+  bool pre_vote = 5;
 }
 
 message RequestVoteReply {

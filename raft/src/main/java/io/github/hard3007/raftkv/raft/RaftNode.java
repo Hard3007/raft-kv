@@ -83,6 +83,18 @@ public final class RaftNode implements RaftRpcHandler {
     private Role role = Role.FOLLOWER;
     private int leaderId = NOBODY;
     private final Set<Integer> votesGranted = new HashSet<>();
+
+    // PreVote (thesis §9.6): a round of "would you vote for me?" before a real election.
+    private boolean preVoting;
+    private long preVoteRound;
+    private final Set<Integer> preVotesGranted = new HashSet<>();
+    /** When we last accepted AppendEntries from a current leader (scheduler time; MIN_VALUE = never). */
+    private long lastLeaderContactMillis = Long.MIN_VALUE;
+
+    // CheckQuorum (thesis §6.2), leader only.
+    private long leaderSinceMillis;
+    /** Per peer: when we last got any reply from it in our current term. */
+    private final Map<Integer, Long> lastHeardFromMillis = new HashMap<>();
     private Scheduler.Cancellable electionTimer;
     private Scheduler.Cancellable heartbeatTimer;
     private Runnable onLeadershipLost = () -> { };
@@ -276,6 +288,9 @@ public final class RaftNode implements RaftRpcHandler {
     @Override
     public RequestVoteReply handleRequestVote(RequestVoteRequest request) {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        if (request.getPreVote()) {
+            return handlePreVote(request);
+        }
         long termBefore = currentTerm;
         int voteBefore = votedFor;
 
@@ -302,6 +317,26 @@ public final class RaftNode implements RaftRpcHandler {
             persistTermAndVote();
         }
         return RequestVoteReply.newBuilder().setTerm(currentTerm).setVoteGranted(granted).build();
+    }
+
+    /**
+     * PreVote receiver (thesis §9.6; not part of Figure 2). Grants only if a real election in
+     * {@code request.term} could make sense: that term is newer than ours, the candidate's log is
+     * at least as up-to-date as ours, and we have not heard from a current leader within the
+     * minimum election timeout. Changes no state at all: no term update, no vote, no timer reset,
+     * so nothing needs persisting. (All-2 does not apply: a PreVote's term is hypothetical.)
+     */
+    private RequestVoteReply handlePreVote(RequestVoteRequest request) {
+        boolean granted = request.getTerm() > currentTerm
+                && !heardFromLeaderRecently()
+                && candidateLogIsUpToDate(request.getLastLogTerm(), request.getLastLogIndex());
+        return RequestVoteReply.newBuilder().setTerm(currentTerm).setVoteGranted(granted).build();
+    }
+
+    /** True if we are the leader, or accepted AppendEntries from one within the minimum election timeout. */
+    private boolean heardFromLeaderRecently() {
+        return role == Role.LEADER || (lastLeaderContactMillis != Long.MIN_VALUE
+                && scheduler.nowMillis() - lastLeaderContactMillis < config.electionTimeoutMinMs());
     }
 
     /**
@@ -365,6 +400,8 @@ public final class RaftNode implements RaftRpcHandler {
             stepDown(currentTerm);
         }
         leaderId = request.getLeaderId();
+        lastLeaderContactMillis = scheduler.nowMillis(); // PreVote: there is a live leader
+        preVoting = false;
         // [Fig2 Follower-2] Hearing from the current leader resets the election timer.
         resetElectionTimer();
 
@@ -427,7 +464,61 @@ public final class RaftNode implements RaftRpcHandler {
     private void onElectionTimeout() {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         if (role != Role.LEADER) {
-            startElection();
+            if (config.preVote()) {
+                startPreVote();
+            } else {
+                startElection();
+            }
+        }
+    }
+
+    /**
+     * PreVote (thesis §9.6): before disturbing anyone with a higher term, ask whether a majority
+     * would vote for us in term currentTerm + 1. Our own term and vote stay unchanged, so a node
+     * cut off from the cluster cannot inflate its term while it is away, and cannot depose a
+     * healthy leader when it comes back.
+     */
+    private void startPreVote() {
+        preVoting = true;
+        preVoteRound++;
+        preVotesGranted.clear();
+        preVotesGranted.add(id);
+        leaderId = NOBODY; // our election timer fired: we no longer believe in a leader
+        resetElectionTimer(); // if this round fails, the next timeout tries again
+        logger.debug("node={} event=start_pre_vote term={}", id, currentTerm + 1);
+        if (isMajority(preVotesGranted.size())) {
+            startElection(); // single-node cluster
+            return;
+        }
+        long round = preVoteRound;
+        RequestVoteRequest request = RequestVoteRequest.newBuilder()
+                .setTerm(currentTerm + 1)
+                .setCandidateId(id)
+                .setLastLogIndex(log.lastIndex())
+                .setLastLogTerm(log.lastTerm())
+                .setPreVote(true)
+                .build();
+        for (int peer : peers) {
+            transport.requestVote(peer, request, reply -> onPreVoteReply(peer, round, reply));
+        }
+    }
+
+    private void onPreVoteReply(int peer, long round, RequestVoteReply reply) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
+        // [Fig2 All-2] A reply carrying a newer real term still means we are behind.
+        if (reply.getTerm() > currentTerm) {
+            stepDown(reply.getTerm());
+            persistTermAndVote();
+            return;
+        }
+        if (!preVoting || round != preVoteRound) {
+            return; // a reply to a round we abandoned
+        }
+        if (reply.getVoteGranted()) {
+            preVotesGranted.add(peer);
+            if (isMajority(preVotesGranted.size())) {
+                startElection(); // a majority would vote for us: now a real election
+            }
         }
     }
 
@@ -436,6 +527,7 @@ public final class RaftNode implements RaftRpcHandler {
      * vote for self, reset election timer, send RequestVote RPCs to all other servers.
      */
     private void startElection() {
+        preVoting = false;
         role = Role.CANDIDATE;
         currentTerm++;
         votedFor = id;
@@ -496,7 +588,9 @@ public final class RaftNode implements RaftRpcHandler {
             nextIndex.put(peer, log.lastIndex() + 1);
             matchIndex.put(peer, 0L);
             acknowledgedRound.put(peer, 0L);
+            lastHeardFromMillis.put(peer, scheduler.nowMillis());
         }
+        leaderSinceMillis = scheduler.nowMillis();
         logger.info("node={} event=became_leader term={} last_log_index={}", id, currentTerm, log.lastIndex());
 
         // Beyond Figure 2 (§5.4.2, §8): commit a no-op from our own term right away. A leader may
@@ -515,6 +609,14 @@ public final class RaftNode implements RaftRpcHandler {
     private void scheduleHeartbeat() {
         heartbeatTimer = scheduler.schedule(config.heartbeatIntervalMs(), () -> {
             scheduler.checkThread();
+            if (role == Role.LEADER && config.checkQuorum() && !heardFromMajorityRecently()) {
+                // CheckQuorum (thesis §6.2): we may be cut off from the cluster. Step down rather
+                // than keep acting as leader (clients then look for the real one).
+                logger.info("node={} event=check_quorum_failed term={}", id, currentTerm);
+                stepDown(currentTerm);
+                leaderId = NOBODY;
+                return;
+            }
             if (role == Role.LEADER) {
                 sendAppendEntriesToAll(); // [Fig2 Leader-1] heartbeats during idle periods
                 scheduleHeartbeat();
@@ -544,10 +646,26 @@ public final class RaftNode implements RaftRpcHandler {
             logger.debug("node={} event=step_down term={}", id, currentTerm);
         }
         role = Role.FOLLOWER;
+        preVoting = false;
         if (wasLeader) {
             failPendingReads();
             onLeadershipLost.run();
         }
+    }
+
+    /** CheckQuorum: has a majority (counting us) replied within an election timeout? */
+    private boolean heardFromMajorityRecently() {
+        long now = scheduler.nowMillis();
+        if (now - leaderSinceMillis < config.electionTimeoutMaxMs()) {
+            return true; // too early to judge
+        }
+        int recent = 1;
+        for (int peer : peers) {
+            if (now - lastHeardFromMillis.get(peer) <= config.electionTimeoutMaxMs()) {
+                recent++;
+            }
+        }
+        return isMajority(recent);
     }
 
     private boolean isMajority(int count) {
@@ -609,6 +727,7 @@ public final class RaftNode implements RaftRpcHandler {
 
         // Any reply in our term, success or not, proves this peer still accepted us as leader
         // when it answered. That is what ReadIndex counts.
+        lastHeardFromMillis.put(peer, scheduler.nowMillis()); // CheckQuorum: this peer is reachable
         if (round > acknowledgedRound.get(peer)) {
             acknowledgedRound.put(peer, round);
             serveReadsIfPossible();

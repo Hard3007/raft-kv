@@ -18,6 +18,7 @@ import io.github.hard3007.raftkv.proto.kv.Status;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesRequest;
 import io.github.hard3007.raftkv.proto.raft.EntryType;
 import io.github.hard3007.raftkv.proto.raft.LogEntry;
+import io.github.hard3007.raftkv.raft.RaftConfig;
 import io.github.hard3007.raftkv.raft.RaftNode;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
@@ -37,6 +38,14 @@ class KvClusterTest {
 
     private static final String SEEDS = "io.github.hard3007.raftkv.kv.Seeds#seeds";
     private static final long WAIT = 20_000;
+
+    /**
+     * For tests that need a leader which has been deposed but does not know it. CheckQuorum would
+     * end that state after about an election timeout, but ReadIndex and the UNKNOWN rule must be
+     * correct without relying on CheckQuorum's timing (it is a liveness aid, not a safety
+     * mechanism), so these tests keep the deposed leader around indefinitely.
+     */
+    private static final RaftConfig WITHOUT_CHECK_QUORUM = RaftConfig.defaults().withCheckQuorum(false);
 
     private static byte[] b(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
@@ -118,7 +127,7 @@ class KvClusterTest {
     @ParameterizedTest(name = "seed {0}")
     @MethodSource(SEEDS)
     void deposedLeaderNeverServesAStaleRead(long seed) {
-        SimKvCluster cluster = new SimKvCluster(5, seed).startAll();
+        SimKvCluster cluster = new SimKvCluster(5, seed, WITHOUT_CHECK_QUORUM, KvService.Options.defaults()).startAll();
         KvClient writer = cluster.newClient(KvClient.Options.defaults());
         int writerEndpoint = cluster.lastClientEndpoint();
         KvClient staleReader = cluster.newClient(new KvClient.Options(1500, 50, 6_000));
@@ -217,7 +226,7 @@ class KvClusterTest {
     @ParameterizedTest(name = "seed {0}")
     @MethodSource(SEEDS)
     void serverTimeoutAfterProposingAnswersUnknown(long seed) {
-        SimKvCluster cluster = new SimKvCluster(5, seed).startAll();
+        SimKvCluster cluster = new SimKvCluster(5, seed, WITHOUT_CHECK_QUORUM, KvService.Options.defaults()).startAll();
         KvClient client = cluster.newClient(new KvClient.Options(1500, 50, 3_000));
         int clientEndpoint = cluster.lastClientEndpoint();
         ok(cluster.<Void>await(done -> client.put(b("warmup"), b("1"), done), WAIT));

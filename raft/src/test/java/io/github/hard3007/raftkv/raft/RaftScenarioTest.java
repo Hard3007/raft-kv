@@ -20,8 +20,12 @@ class RaftScenarioTest {
 
     private static final String SEEDS = "io.github.hard3007.raftkv.raft.Seeds#seeds";
 
-    private static final RaftConfig FAST = RaftConfig.defaults().withElectionTimeout(60, 80);
-    private static final RaftConfig SLOW = RaftConfig.defaults().withElectionTimeout(400, 600);
+    // These scenarios force one exact sequence of elections. PreVote changes which elections can
+    // happen at all (an isolated node can no longer inflate its term), so it is off here; the
+    // randomized Figure 8 tests in RaftPersistenceTest run with it on.
+    private static final RaftConfig BASE = RaftConfig.defaults().withPreVote(false);
+    private static final RaftConfig FAST = BASE.withElectionTimeout(60, 80);
+    private static final RaftConfig SLOW = BASE.withElectionTimeout(400, 600);
 
     /**
      * Figure 8 of the Raft paper, made deterministic.
@@ -48,7 +52,7 @@ class RaftScenarioTest {
     void figure8_leaderDoesNotCommitPreviousTermEntryByCountingReplicas(long seed) {
         RaftCluster cluster = new RaftCluster(5, seed, SLOW.withMaxEntriesPerAppend(1));
         cluster.setConfig(1, FAST.withMaxEntriesPerAppend(1));
-        cluster.setConfig(5, RaftConfig.defaults().withElectionTimeout(100, 150).withMaxEntriesPerAppend(1));
+        cluster.setConfig(5, BASE.withElectionTimeout(100, 150).withMaxEntriesPerAppend(1));
         LogEntry first = entry(1, 1, "a");
         cluster.seedPersistentState(1, 3, 0, List.of(first, entry(2, 2, "t2")));
         for (int i = 2; i <= 4; i++) {

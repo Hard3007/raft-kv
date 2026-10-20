@@ -173,10 +173,32 @@ and the B-Tree is a cache of the state machine. So the B-Tree can run with `LAZY
   recovery code on whatever was fsynced.
 
 ### 2.2 Decisions and trade-offs
-- **No "check quorum".** Figure 2 does not make a leader step down when it cannot reach a
-  majority, so a partitioned leader keeps believing it leads. That is safe: it cannot commit
-  anything, and its first contact with a newer term demotes it. ReadIndex (Phase 3) will not
-  rely on leases; it confirms leadership with a heartbeat quorum for each read.
+- **PreVote (thesis §9.6), added after Phase 5.** When its election timer fires, a node first
+  asks "would you vote for me in term currentTerm + 1?" (`RequestVoteRequest.pre_vote`).
+  - It changes neither its own term nor its vote. Receivers change nothing either: no term
+    update, no vote, no timer reset, nothing to persist.
+  - A peer grants a PreVote only if three things hold: that term is newer than its own, the
+    candidate's log is at least as up-to-date (§5.4.1), and it has **not heard from a current
+    leader within the minimum election timeout** (`heardFromLeaderRecently`).
+  - Only after a majority of PreVotes does the node become a candidate and run Figure 2's real
+    election.
+  - Effect: a node that is cut off can no longer inflate its term while it is away, and cannot
+    depose a healthy leader when it returns. Tests: `RaftPreVoteTest`, which fails 3/3 seeds
+    with PreVote off.
+- **CheckQuorum (thesis §6.2), added after Phase 5.** A leader that has not heard any reply
+  from a majority (counting itself) within the maximum election timeout steps down. It checks
+  at every heartbeat (`heardFromMajorityRecently`).
+  - Before this, a partitioned leader kept believing it led forever. That was safe (it cannot
+    commit), but clients stuck with it saw only timeouts. Test:
+    `RaftPreVoteTest.anIsolatedLeaderStepsDown`, which fails 3/3 seeds with CheckQuorum off.
+  - **ReadIndex does not rely on CheckQuorum.** It still confirms leadership with a fresh
+    heartbeat round for every read. CheckQuorum depends on timeouts, so a deposed leader can
+    still be unaware for up to about an election timeout. The ReadIndex tests in `KvClusterTest`
+    therefore run with CheckQuorum off, to keep that dangerous window open indefinitely.
+- **Both are on by default** (`RaftConfig.preVote`, `checkQuorum`). Tests that drive Figure 2's
+  election rules by hand (`RaftNodeTest`, `RaftReadIndexTest`) and the hand-built Figure 8
+  scenario turn PreVote off, because they need one exact sequence of elections. The randomized
+  lab-style and chaos tests run with both on.
 - **The election timer is reset only** on: (a) an AppendEntries from the current-term leader,
   (b) granting a vote, (c) starting an election. It is *not* reset by rejected RequestVotes, or
   by RPCs from stale terms. Otherwise a node with a stale log could keep everyone from timing out.
@@ -232,6 +254,8 @@ in-order apply on every apply) that every simulated-cluster test runs.
 | Leader-3: send entries from nextIndex; on success update nextIndex/matchIndex; on inconsistency back up and retry | `sendAppendEntries`, `onAppendEntriesReply`, `fastBackupNextIndex` | `RaftAgreementTest.fastLogBackup`, `followerRejoinsAndCatchesUp`; `RaftScenarioTest.fastBackup_skipsAWholeConflictingTermPerRoundTrip` |
 | Leader-4: commit N if a majority has matchIndex ≥ N **and log[N].term == currentTerm** | `advanceCommitIndex` | `RaftScenarioTest.figure8_leaderDoesNotCommitPreviousTermEntryByCountingReplicas`; `RaftPersistenceTest.figure8OnUnreliableNetwork` |
 | Beyond Figure 2: leader no-op (§5.4.2, §8) | `becomeLeader` | all cluster tests (each leader's first entry) |
+| Beyond Figure 2: PreVote (thesis §9.6) | `startPreVote`, `handlePreVote`, `onPreVoteReply`, `heardFromLeaderRecently` | `RaftPreVoteTest` (receiver rules, partitioned follower) |
+| Beyond Figure 2: CheckQuorum (thesis §6.2) | heartbeat timer, `heardFromMajorityRecently` | `RaftPreVoteTest.anIsolatedLeaderStepsDown` |
 
 ### 2.4 The lab-style tests
 These are modeled on the MIT 6.5840 Raft lab (3A–3C). Every one runs per seed:
@@ -672,25 +696,30 @@ not done it, so the published numbers come from the configuration above.
     every simulated crash in the Raft, KV and chaos suites (§1.6, §2, §4).
   - Testing real power loss would need a VM or a fault-injecting block device.
 
-### 5.7 Observed cost of no PreVote
-Under Docker chaos, every paused or disconnected node keeps timing out and starting elections.
-The term reached **236** in a 60 s run (and 14 by the time a freshly started cluster was healthy,
-while containers came up one by one). Each rejoin with a higher term forces a new election. That
-is safe, but it is the availability cost listed in §6, now measured.
+### 5.7 PreVote under Docker chaos: the term, before and after
+Without PreVote, every paused or disconnected node keeps timing out and incrementing its term,
+and each rejoin with a higher term forces a new election. The highest term across the nodes
+after a 60 s Docker chaos run (`scripts/docker-chaos.sh 60`; random faults, so counts vary):
+
+| Build | Run 1 | Run 2 | Completed ops (run 1 / run 2) | Verdict |
+|---|---|---|---|---|
+| Before PreVote (commit `3efea60` server) | 193 | 152 | 1,886 / 3,542 | LINEARIZABLE, both |
+| With PreVote + CheckQuorum | **19** | **12** | 3,831 / 3,022 | LINEARIZABLE, both |
+
+An earlier run before PreVote had reached 236. With PreVote, the term only moves when an
+election is actually needed (a killed, paused or disconnected leader), so about 10× fewer
+elections happen in the same fault schedule.
 
 ## 6. Known limitations
-- **No PreVote and no CheckQuorum.**
-  - A node that was partitioned away keeps timing out and incrementing its term. When it
-    rejoins, its higher term forces the current leader to step down and an election to run,
-    even though the cluster was healthy.
-  - This is safe: the rejoining node cannot win unless its log is up to date. But it costs
-    availability: a few hundred milliseconds with no leader.
-  - In the other direction, without CheckQuorum a leader that loses its majority keeps
-    believing it leads. That is also safe: it cannot commit writes, and ReadIndex refuses to
-    serve reads without a confirming majority. Clients talking to it see timeouts until they
-    try another node.
-  - PreVote (Raft thesis §9.6) would fix the first issue, CheckQuorum (thesis §6.2) the second.
-  - Measured under Docker chaos: the term reached 236 in 60 s (§5.7).
+- **PreVote and CheckQuorum are implemented** (§2.2), so the earlier "no PreVote" limitation is
+  gone. What remains:
+  - **No leadership transfer.** A healthy leader cannot hand off before maintenance; it has to
+    be stopped, which costs an election timeout of unavailability. With PreVote, the
+    replacement still needs a PreVote majority first: peers grant it only once they have not
+    heard from a leader for the minimum election timeout.
+  - **CheckQuorum is timer-based.** A deposed leader can stay unaware for up to about an
+    election timeout. That is safe because ReadIndex never trusts it (§2.2), but clients may
+    wait that long before being redirected.
 - **Simulated partitions in the in-process test are filtered in the gRPC layer**, not at the
   network. Docker chaos uses real network disconnects.
 - **`docker kill` is a process crash, not a power loss** (§5.6); power loss is covered only by

@@ -25,6 +25,9 @@ import org.junit.jupiter.api.Test;
  */
 class RaftNodeTest {
 
+    /** These tests drive Figure 2 rules one at a time; PreVote has its own tests (RaftPreVoteTest). */
+    static final RaftConfig FIGURE_2_ONLY = RaftConfig.defaults().withPreVote(false);
+
     private final Simulation sim = new Simulation(1);
     private final SimulatedFileSystem disk = new SimulatedFileSystem(new Random(1));
     private final List<LogEntry> applied = new ArrayList<>();
@@ -48,7 +51,7 @@ class RaftNodeTest {
 
     /** Starts (or, after a crash, restarts) node 1 from whatever is on its disk. */
     private RaftNode boot() {
-        RaftNode n = new RaftNode(1, List.of(2, 3), RaftConfig.defaults(), sim.newNodeScheduler(), SILENT,
+        RaftNode n = new RaftNode(1, List.of(2, 3), FIGURE_2_ONLY, sim.newNodeScheduler(), SILENT,
                 RaftStorage.open(disk, "raft.wal"), applied::add, 0, new Random(1));
         n.start();
         return n;

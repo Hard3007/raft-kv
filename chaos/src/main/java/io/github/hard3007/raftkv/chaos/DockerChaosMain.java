@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Chaos against the real 5-container cluster from docker-compose.yml. Client threads run the
@@ -52,6 +54,7 @@ public final class DockerChaosMain {
     private final Map<Fault, Integer> injected = new TreeMap<>();
     private final Map<String, Double> peakMemoryMib = new TreeMap<>();
     private String memoryLimit = "?";
+    private long finalTerm = -1;
 
     private DockerChaosMain(String project) {
         this.project = project;
@@ -128,6 +131,7 @@ public final class DockerChaosMain {
         }
         clients.forEach(BlockingKvClient::close);
         long wallMillis = (System.nanoTime() - start) / 1_000_000;
+        finalTerm = highestTerm();
 
         List<Operation> operations = history.operations();
         long checkStart = System.nanoTime();
@@ -138,6 +142,7 @@ public final class DockerChaosMain {
         int discarded = workloads.stream().mapToInt(BlockingWorkload::discardedReads).sum();
         writeReport(report, seconds, clientCount, operations.size() + discarded, completed, pending, discarded, result,
                 wallMillis, checkMillis);
+        System.out.printf("final term %d (highest current term across nodes after the run)%n", finalTerm);
         System.out.printf("verdict %s: %d operations (%d completed, %d pending writes, %d reads left out); faults %s;"
                 + " peak memory %s (limit %s); report %s%n", result.verdict(), operations.size() + discarded, completed,
                 pending, discarded, injected, peakMemoryMib, memoryLimit, report);
@@ -229,6 +234,20 @@ public final class DockerChaosMain {
         }
     }
 
+    /** The highest current term reported by any node's /status, or -1. Every election bumps the term. */
+    private static long highestTerm() {
+        long highest = -1;
+        for (int node = 1; node <= 5; node++) {
+            String status = run("curl", "-fsS", "--max-time", "2", "http://localhost:" + (8080 + node) + "/status");
+            Matcher term = status == null ? null
+                    : Pattern.compile("\"term\":(\\d+)").matcher(status);
+            if (term != null && term.find()) {
+                highest = Math.max(highest, Long.parseLong(term.group(1)));
+            }
+        }
+        return highest;
+    }
+
     // ------------------------------------------------------------------ report
 
     private void writeReport(Path path, int seconds, int clientCount, int operations, int completed, int pending,
@@ -255,6 +274,7 @@ public final class DockerChaosMain {
         md.append("| completed | ").append(completed).append(" |\n");
         md.append("| pending writes (unknown outcome) | ").append(pending).append(" |\n");
         md.append("| reads left out (no definite answer) | ").append(discarded).append(" |\n");
+        md.append("| final term (highest across nodes after the run) | ").append(finalTerm).append(" |\n");
         for (Fault fault : Fault.values()) {
             md.append("| `docker ").append(switch (fault) {
                 case KILL -> "kill";

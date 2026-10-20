@@ -77,7 +77,7 @@ class RaftReadIndexTest {
                 appends.add(new SentAppend(peer, request, onReply));
             }
         };
-        leader = new RaftNode(1, peers, RaftConfig.defaults(), sim.newNodeScheduler(), manual,
+        leader = new RaftNode(1, peers, RaftNodeTest.FIGURE_2_ONLY, sim.newNodeScheduler(), manual,
                 RaftStorage.open(new SimulatedFileSystem(new Random(1)), "raft.wal"), entry -> { }, 0, new Random(1));
         leader.start();
         sim.runFor(300); // the election timer (150-300 ms) fires once

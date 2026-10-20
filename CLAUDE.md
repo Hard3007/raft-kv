@@ -67,6 +67,8 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
     invocation. The checker has a self-test for this case.
 12. **Persistence in tests.** `Persister` has an in-memory implementation (models "fsynced vs. not", so a crash
     loses unsynced data) for the simulator, and a file-backed implementation on the `Wal`.
+14. **PreVote + CheckQuorum** (added after Phase 5): on by default. ReadIndex must stay correct without relying on
+    CheckQuorum's timing; tests that need a deposed-but-unaware leader turn CheckQuorum off.
 13. **/status** uses the JDK's `com.sun.net.httpserver` (no extra dependency). The public status page and a
     `/cluster` aggregate are served from the VM itself (avoids mixed content and CORS). HTTPS is decided in Phase 8.
 
