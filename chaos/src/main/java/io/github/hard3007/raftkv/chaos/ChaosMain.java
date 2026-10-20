@@ -56,7 +56,7 @@ public final class ChaosMain {
 
         System.out.printf("chaos: %d runs from seed %d (%s), %d threads%n", runs, startSeed, label, threads);
         long wallStart = System.currentTimeMillis();
-        List<ChaosRun.Result> results = runAll(runs, startSeed, config, threads);
+        List<ChaosRun.Result> results = runAll(runs, startSeed, config, threads, verbose);
         long wallMillis = System.currentTimeMillis() - wallStart;
 
         Map<Verdict, Integer> counts = new EnumMap<>(Verdict.class);
@@ -83,8 +83,8 @@ public final class ChaosMain {
         System.exit(counts.get(Verdict.LINEARIZABLE) == runs && errors == 0 ? 0 : 1);
     }
 
-    private static List<ChaosRun.Result> runAll(int runs, long startSeed, ChaosConfig config, int threads)
-            throws Exception {
+    private static List<ChaosRun.Result> runAll(int runs, long startSeed, ChaosConfig config, int threads,
+            boolean verbose) throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         try {
             List<Future<ChaosRun.Result>> futures = new ArrayList<>();
@@ -95,7 +95,10 @@ public final class ChaosMain {
             List<ChaosRun.Result> results = new ArrayList<>();
             int done = 0;
             for (Future<ChaosRun.Result> future : futures) {
-                results.add(future.get());
+                ChaosRun.Result result = future.get();
+                // Keep histories only where they explain something, so 10,000 runs fit in memory.
+                results.add(verbose || !result.passed() ? result : result.withoutDetails());
+                futures.set(done, null);
                 if (++done % 50 == 0 || done == runs) {
                     System.out.printf("  %d/%d runs done%n", done, runs);
                 }

@@ -58,6 +58,11 @@ final class ChaosRun {
         boolean passed() {
             return error == null && verdict == Verdict.LINEARIZABLE;
         }
+
+        /** The same result without the history and fault log (kept only for runs that need explaining). */
+        Result withoutDetails() {
+            return new Result(seed, verdict, stats, check, List.of(), List.of(), wallMillis, error);
+        }
     }
 
     private final long seed;
