@@ -1,0 +1,15 @@
+<configuration>
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] %logger{20} - %msg%n</pattern>
+    </encoder>
+  </appender>
+  <!-- ERROR still shows: a failed task on a node thread is logged at ERROR. -->
+  <logger name="io.github.hard3007.raftkv" level="WARN"/>
+  <logger name="io.github.hard3007.raftkv.storage" level="ERROR"/>
+  <logger name="io.grpc" level="ERROR"/>
+  <logger name="io.netty" level="ERROR"/>
+  <root level="WARN">
+    <appender-ref ref="CONSOLE"/>
+  </root>
+</configuration>

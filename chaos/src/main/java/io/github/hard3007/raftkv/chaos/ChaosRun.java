@@ -67,7 +67,7 @@ final class ChaosRun {
         this.config = config;
         this.cluster = new SimKvCluster(config.nodes(), seed);
         this.random = cluster.sim.random();
-        this.history = new History(cluster.sim::now);
+        this.history = History.forSimulation(cluster.sim::now);
     }
 
     static Result run(long seed, ChaosConfig config) {

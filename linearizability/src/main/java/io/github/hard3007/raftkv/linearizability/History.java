@@ -14,45 +14,60 @@ import java.util.function.LongSupplier;
  * effect at any later point. {@link #discard} removes a read with no answer (reads have no side
  * effects).
  *
- * <p>Timestamps combine the supplied clock (milliseconds; the simulation's virtual clock in chaos
- * tests) with a counter, as {@code clock * 1_000_000 + counter}. In a single-threaded simulation,
- * that gives every event a unique time that matches the true order of events, even within one
- * millisecond. Not thread-safe.
+ * <p>Timestamps come from one of two clocks:
+ * <ul>
+ *   <li>{@link #forSimulation}: virtual milliseconds combined with a counter, as
+ *       {@code millis * 1_000_000 + counter}. The simulation is single-threaded, so this gives every
+ *       event a unique time that matches the true order of events, even within one millisecond.
+ *   <li>{@link #withNanoTime}: {@link System#nanoTime()}, for real threads and real networks. Equal
+ *       readings are possible and are treated as concurrent by the checker.
+ * </ul>
+ * Thread-safe: client threads may record concurrently.
  */
 public final class History {
 
     private record Invocation(int client, Operation.Kind kind, String key, String argument, long time) {
     }
 
-    private final LongSupplier clockMillis;
+    private final LongSupplier clock;
     private final Map<Integer, Invocation> open = new HashMap<>();
     private final List<Operation> operations = new ArrayList<>();
     private int nextId;
-    private long counter;
 
-    public History(LongSupplier clockMillis) {
-        this.clockMillis = clockMillis;
+    private History(LongSupplier clock) {
+        this.clock = clock;
+    }
+
+    /** A history on a simulation's virtual clock (milliseconds). */
+    public static History forSimulation(LongSupplier virtualMillis) {
+        long[] counter = {0};
+        return new History(() -> virtualMillis.getAsLong() * 1_000_000 + (counter[0]++ % 1_000_000));
+    }
+
+    /** A history on {@link System#nanoTime()}, for real threads. */
+    public static History withNanoTime() {
+        return new History(System::nanoTime);
     }
 
     private long now() {
-        return clockMillis.getAsLong() * 1_000_000 + (counter++ % 1_000_000);
+        return clock.getAsLong();
     }
 
     /** Records an invocation; returns the operation id to complete it with. */
-    public int invoke(int client, Operation.Kind kind, String key, String argument) {
+    public synchronized int invoke(int client, Operation.Kind kind, String key, String argument) {
         int id = nextId++;
         open.put(id, new Invocation(client, kind, key, argument, now()));
         return id;
     }
 
-    public void complete(int id, Operation.Result result) {
+    public synchronized void complete(int id, Operation.Result result) {
         Invocation call = take(id);
         operations.add(new Operation(id, call.client(), call.kind(), call.key(), call.argument(), call.time(), now(),
                 result));
     }
 
     /** A write whose outcome is unknown: it may take effect at any point after its invocation, or never. */
-    public void leavePending(int id) {
+    public synchronized void leavePending(int id) {
         Invocation call = take(id);
         if (call.kind() == Operation.Kind.GET) {
             throw new IllegalArgumentException("reads are discarded, not left pending");
@@ -62,7 +77,7 @@ public final class History {
     }
 
     /** Drops an operation entirely, e.g. a read that never got an answer. */
-    public void discard(int id) {
+    public synchronized void discard(int id) {
         take(id);
     }
 
@@ -78,7 +93,7 @@ public final class History {
      * The recorded operations. Operations still open (invoked, never finished) are treated like
      * unknown outcomes: writes become pending, reads are dropped.
      */
-    public List<Operation> operations() {
+    public synchronized List<Operation> operations() {
         List<Operation> all = new ArrayList<>(operations);
         open.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
             Invocation call = entry.getValue();

@@ -116,6 +116,7 @@ public final class KvClient {
 
     /** Called before {@link #start}, so a rejected second operation never consumes a number. */
     private long nextSequence() {
+        scheduler.checkThread();
         checkNotBusy();
         return ++lastSequence;
     }
@@ -127,6 +128,7 @@ public final class KvClient {
     }
 
     private <T> void start(Attempt attempt, Consumer<KvResult<T>> done) {
+        scheduler.checkThread();
         checkNotBusy();
         busy = true;
         long deadline = scheduler.nowMillis() + options.giveUpAfterMs();

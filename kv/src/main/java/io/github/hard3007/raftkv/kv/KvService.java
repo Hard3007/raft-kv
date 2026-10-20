@@ -76,6 +76,7 @@ public final class KvService {
     // ------------------------------------------------------------------ requests
 
     public void get(GetRequest request, Consumer<GetReply> reply) {
+        scheduler.checkThread();
         if (request.getKey().size() > KvKeys.MAX_USER_KEY_SIZE) {
             reply.accept(GetReply.newBuilder().setStatus(Status.INVALID_ARGUMENT).build());
             return;
@@ -114,6 +115,7 @@ public final class KvService {
     }
 
     public void put(PutRequest request, Consumer<PutReply> reply) {
+        scheduler.checkThread();
         if (request.getKey().size() > KvKeys.MAX_USER_KEY_SIZE || request.getValue().size() > KvKeys.MAX_USER_VALUE_SIZE) {
             reply.accept(PutReply.newBuilder().setStatus(Status.INVALID_ARGUMENT).build());
             return;
@@ -129,6 +131,7 @@ public final class KvService {
     }
 
     public void delete(DeleteRequest request, Consumer<DeleteReply> reply) {
+        scheduler.checkThread();
         if (request.getKey().size() > KvKeys.MAX_USER_KEY_SIZE) {
             reply.accept(DeleteReply.newBuilder().setStatus(Status.INVALID_ARGUMENT).build());
             return;

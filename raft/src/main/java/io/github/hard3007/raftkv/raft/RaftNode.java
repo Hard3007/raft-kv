@@ -38,7 +38,8 @@ import org.slf4j.LoggerFactory;
  * <p><b>Threading.</b> Not thread-safe by design. Every method (RPC handlers, reply callbacks,
  * timers, {@link #propose}) must run on the node's single thread, which the {@link Scheduler}
  * and {@link Transport} guarantee. This class never creates threads or reads the clock, so the
- * same code runs on the deterministic simulator and in production.
+ * same code runs on the deterministic simulator and in production. Every entry point calls
+ * {@link Scheduler#checkThread()}, so a call from any other thread fails immediately.
  */
 public final class RaftNode implements RaftRpcHandler {
 
@@ -125,18 +126,20 @@ public final class RaftNode implements RaftRpcHandler {
         this.lastApplied = appliedIndex;
     }
 
-    /** Runs on the node thread whenever this node stops being leader (to fail pending requests). */
+    /** Runs on the node thread whenever this node stops being leader (to fail pending requests). Call before {@link #start()}. */
     public void setOnLeadershipLost(Runnable callback) {
         this.onLeadershipLost = callback;
     }
 
     /** Starts the node as a follower. */
     public void start() {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         resetElectionTimer();
     }
 
     /** Stops all timers. Used when the node shuts down or (in simulation) crashes. */
     public void stop() {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         cancelTimers();
     }
 
@@ -149,6 +152,7 @@ public final class RaftNode implements RaftRpcHandler {
      * node is not the leader.
      */
     public Optional<Proposal> propose(byte[] command) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         if (role != Role.LEADER) {
             return Optional.empty();
         }
@@ -187,6 +191,7 @@ public final class RaftNode implements RaftRpcHandler {
      * </ol>
      */
     public void readIndex(ReadIndexCallback callback) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         if (role != Role.LEADER) {
             callback.onNotLeader();
             return;
@@ -214,6 +219,7 @@ public final class RaftNode implements RaftRpcHandler {
         }
         heartbeatRoundScheduled = true;
         scheduler.schedule(0, () -> {
+            scheduler.checkThread();
             heartbeatRoundScheduled = false;
             if (role == Role.LEADER) {
                 heartbeatRound++;
@@ -269,6 +275,7 @@ public final class RaftNode implements RaftRpcHandler {
     /** [Fig2 Follower-1] Respond to RPCs from candidates and leaders (every role answers). */
     @Override
     public RequestVoteReply handleRequestVote(RequestVoteRequest request) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         long termBefore = currentTerm;
         int voteBefore = votedFor;
 
@@ -313,6 +320,7 @@ public final class RaftNode implements RaftRpcHandler {
     /** [Fig2 Follower-1] Respond to RPCs from candidates and leaders (every role answers). */
     @Override
     public AppendEntriesReply handleAppendEntries(AppendEntriesRequest request) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         long termBefore = currentTerm;
         int voteBefore = votedFor;
         List<LogEntry> appended = new ArrayList<>();
@@ -417,6 +425,7 @@ public final class RaftNode implements RaftRpcHandler {
      * [Fig2 Candidate-4] If election timeout elapses: start new election.
      */
     private void onElectionTimeout() {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         if (role != Role.LEADER) {
             startElection();
         }
@@ -456,6 +465,7 @@ public final class RaftNode implements RaftRpcHandler {
     }
 
     private void onRequestVoteReply(int peer, long electionTerm, RequestVoteReply reply) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -504,6 +514,7 @@ public final class RaftNode implements RaftRpcHandler {
 
     private void scheduleHeartbeat() {
         heartbeatTimer = scheduler.schedule(config.heartbeatIntervalMs(), () -> {
+            scheduler.checkThread();
             if (role == Role.LEADER) {
                 sendAppendEntriesToAll(); // [Fig2 Leader-1] heartbeats during idle periods
                 scheduleHeartbeat();
@@ -585,6 +596,7 @@ public final class RaftNode implements RaftRpcHandler {
     }
 
     private void onAppendEntriesReply(int peer, AppendEntriesRequest request, long round, AppendEntriesReply reply) {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -708,6 +720,7 @@ public final class RaftNode implements RaftRpcHandler {
     }
 
     public Status status() {
+        scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         return new Status(id, role, currentTerm, leaderId, commitIndex, lastApplied, log.lastIndex());
     }
 

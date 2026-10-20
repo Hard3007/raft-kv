@@ -17,6 +17,8 @@ import java.util.function.BooleanSupplier;
 public final class Simulation {
 
     private final Random random;
+    /** The one thread allowed to run this simulation (the one that created it). */
+    private final Thread owner = Thread.currentThread();
     private final PriorityQueue<Event> queue = new PriorityQueue<>();
     private long now;
     private long nextSequence;
@@ -103,6 +105,14 @@ public final class Simulation {
 
         public void kill() {
             alive = false;
+        }
+
+        @Override
+        public void checkThread() {
+            if (Thread.currentThread() != owner) {
+                throw new IllegalStateException("thread confinement violated: simulation owned by " + owner.getName()
+                        + " was used from " + Thread.currentThread().getName());
+            }
         }
     }
 

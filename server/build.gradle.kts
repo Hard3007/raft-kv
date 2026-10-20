@@ -8,10 +8,15 @@ dependencies {
     implementation(project(":client"))
     implementation(libs.grpc.netty.shaded)
     runtimeOnly(libs.logback.classic)
-    testImplementation(libs.grpc.inprocess)
+    testImplementation(project(":linearizability"))
 }
 
 application {
     mainClass = "io.github.hard3007.raftkv.server.Main"
+    applicationName = "raft-kv"
     applicationDefaultJvmArgs = listOf("-Xmx256m")
+}
+
+tasks.test {
+    maxHeapSize = "1g" // five real nodes plus clients in one JVM
 }

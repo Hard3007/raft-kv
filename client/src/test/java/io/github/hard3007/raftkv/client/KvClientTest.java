@@ -44,6 +44,11 @@ class KvClientTest {
             return () -> cancelled[0] = true;
         }
 
+        @Override
+        public void checkThread() {
+            // single-threaded test
+        }
+
         void advance(long millis) {
             long until = now + millis;
             while (!tasks.isEmpty() && tasks.peek().at <= until) {
