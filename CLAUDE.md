@@ -94,8 +94,7 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 
 ## Status
 - Done: Phases 0–6, plus PreVote and CheckQuorum (between Phases 5 and 6).
-- Next: the final sweeps for Phase 6 (10,000-seed chaos, 180 s Docker chaos), then Phase 7 (benchmarks,
-  failover, AppendEntries batching/pipelining, group commit). Waiting for "continue" after the sweeps.
+- Next: Phase 7 (benchmarks, failover, AppendEntries batching/pipelining, group commit). Waiting for "continue".
 - Phase 7 reminders:
   - The Figure 8 tests must keep `maxEntriesPerAppend = 1` (DESIGN.md §2.5) when replication changes.
   - Pipelining must never infer matchIndex from anything but a successful AppendEntries (§2.6 rule).
@@ -105,8 +104,9 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   `accept-misattributed-replies` mutation is caught. Never identify a peer by the connection a reply came on.
 - Final evidence must all come from ONE final commit: Raft gate, 10,000-seed sweep, five 180 s Docker runs.
 - Resume numbers so far (Codespace, 2-core AMD EPYC 7763):
-  - **10,000 / 10,000 simulated chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=10000`, commit 43a3adb).
-  - Docker chaos: LINEARIZABLE on 3efea60 (Phase 5); after Phase 6, one NOT_LINEARIZABLE run is OPEN (above).
+  - **10,000 / 10,000 simulated chaos runs LINEARIZABLE** (`./gradlew chaos -Pruns=10000`, commit c23409c).
+  - **Five 180 s Docker chaos runs, all LINEARIZABLE** (`scripts/docker-chaos.sh 180`, commit c23409c).
+  - Evidence: reports/final-evidence-c23409c.md.
 
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).

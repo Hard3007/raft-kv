@@ -875,6 +875,10 @@ election is actually needed (a killed, paused or disconnected leader), so about 
 elections happen in the same fault schedule.
 
 ### 5.8 The bug Docker chaos found: replies counted for the wrong node
+**Final evidence after the fix** (all from commit `c23409c`, `reports/final-evidence-c23409c.md`): the Raft gate
+(1,285 runs), 10,000/10,000 simulated chaos runs LINEARIZABLE, and five 180 s Docker chaos runs, all
+LINEARIZABLE, with 0 phantom votes in 105 elections (14 of 29 before the fix).
+
 **Symptom.** A 180 s Docker chaos run was NOT_LINEARIZABLE. The witness
 (`reports/chaos/docker-chaos-180s-920f53e-20261020T102536Z-violation.txt`) ends with a read of
 `k2` returning `c0-410`, a value overwritten many times by writes that had completed seconds
