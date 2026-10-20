@@ -15,12 +15,15 @@ service KvService {
 enum Status {
   STATUS_UNSPECIFIED = 0;
   OK = 1;
-  // This node is not the leader. The client should retry at leader_hint
-  // (if set) or try another node.
+  // Definite: this node is not the leader and did NOT propose the request. Retry at
+  // leader_hint (if set) or another node.
   NOT_LEADER = 2;
-  // The leader could not commit or confirm the request in time. The outcome
-  // is unknown for writes: the client must retry with the SAME sequence number.
-  TIMEOUT = 3;
+  // The request may or may not take effect: it was proposed, but the leader stepped down or
+  // timed out before it was applied. A write must be retried with the SAME sequence number,
+  // which session deduplication turns into exactly-once. Never reported as a failure.
+  UNKNOWN = 3;
+  // Definite: rejected before proposing (for example, a key or value over the size limit).
+  INVALID_ARGUMENT = 4;
 }
 
 // Present on every reply so a client can follow redirects.

@@ -282,7 +282,157 @@ reverted.
   crash-and-restart unit tests catch it every time. Phase 4's chaos harness adds more crash
   points, but this rule is guarded by its unit tests.
 
+## 3. Key-value service (`kv/`, `client/`)
+
+### 3.1 State machine layout
+`KvStateMachine` stores everything in one B-Tree, in two key spaces:
+```
+'D' + user key            -> user value                     (data)
+'S' + clientId (8 bytes)  -> lastSequence (8) | existed (1)   (session table)
+```
+- **Limits.** User keys are capped at 255 B (one below the B-Tree's 256, for the prefix) and
+  values at 1024 B. Larger ones are rejected with `INVALID_ARGUMENT` before anything is proposed.
+  A session row is 9 B of key and 9 B of value.
+- **One log entry = one atomic B-Tree batch.** Applying an entry writes the data change, the
+  client's session row, and `setAppliedIndex(entry.index)` in a single `WriteBatch`, so a single
+  WAL record (§1.4).
+  - After any crash the tree is exactly "the state after entry N, sessions included".
+  - Raft resumes with `lastApplied = commitIndex = N` (the new `appliedIndex` constructor
+    argument of `RaftNode`) and re-applies from N + 1. That re-application cannot double-apply
+    anything, because the session rows rolled back together with the data.
+- **Bounded recovery.** The tree runs with lazy fsync (§1.5). Left alone it would fsync only on
+  page eviction or a 16 MB checkpoint, so after a power loss Raft could have to re-apply a very
+  long stretch of log. `KvStateMachine` syncs the tree every `syncEveryEntries` applied entries
+  to bound that work.
+  - A 200-seed test run showed why this matters: with a small dataset, nothing was ever
+    evicted, and a restarted node sometimes came back with an empty tree.
+  - The sync point is count-based, so it is deterministic.
+- **Determinism.** `apply` depends only on the entry and the tree's current contents: no
+  clocks, no randomness, no iteration over hash-ordered collections. Every replica therefore
+  reaches the same state. `KvStateMachineTest.applyIsDeterministic` checks byte-identical trees
+  and identical replies on two replicas after 2,000 random entries.
+
+### 3.2 Client sessions (exactly-once writes)
+- **Numbering.** Each client has a random 64-bit id and numbers its writes 1, 2, 3, ... A retry
+  reuses the number. A client has **at most one outstanding request** (`KvClient` enforces this),
+  which is why the server needs only one cached reply per client.
+- **Rules when applying a write with sequence s** for a client whose session says `lastSequence = L`:
+  - `s > L`: apply it, and store `(s, reply)`.
+  - `s == L`: a retry of the latest write. Return the **cached reply** and change nothing. This
+    matters for deletes: re-executing would report `existed = false`, the cached reply says `true`.
+  - `s < L`: a long-delayed copy of an older write the client stopped waiting for. Change
+    nothing; this keeps an old put from overwriting a newer value.
+- **Why this preserves linearizability.** A write proposed twice shows up in the log twice, but
+  only the first copy takes effect, at one point in the log order. Each copy that applies is a
+  commit point, and the session rule makes all but the first one no-ops. So there is a single
+  linearization point between the client's first send and the reply it finally accepts.
+- **Never evicted.** Session rows are never removed (see §5).
+
+### 3.3 Write path and the "unknown" outcome
+- **Write path.** `KvService.put/delete` validates, proposes to Raft, and remembers
+  `(index, term)`. When the entry at that index is applied, the reply goes out.
+  This is Figure 2's Leader-2: "respond after entry applied to state machine".
+- **Status rule: never report "failed" for a write that might still commit.**
+
+  | Status | Meaning | When |
+  |---|---|---|
+  | `OK` | applied (or a duplicate of an applied write) | our entry applied at our index |
+  | `NOT_LEADER` | **definite**: nothing was proposed | `propose` refused because this node is not the leader |
+  | `INVALID_ARGUMENT` | **definite**: nothing was proposed | key or value over the limit |
+  | `UNKNOWN` | may or may not take effect | the leader stepped down after proposing, the 1 s request timeout fired, or a different entry ended up at our index |
+
+  - On step-down, `RaftNode` calls `setOnLeadershipLost`, and `KvService` answers every pending
+    write with `UNKNOWN`. A new leader may still commit the entry.
+  - `KvClient` retries `UNKNOWN` with the **same sequence number**, and the session table turns
+    that into exactly-once.
+  - If the client gives up (default 30 s), the result is `KvResult.Unknown`, never a failure.
+- **Tests:**
+  - `KvClusterTest.leaderThatStepsDownAfterProposingAnswersUnknown` and
+    `serverTimeoutAfterProposingAnswersUnknown` check the status rule.
+  - `retriedWriteIsAppliedOnceAndReturnsTheOriginalReply` checks exactly-once delivery of a retry.
+  - Changing the step-down reply to `NOT_LEADER` makes the first test fail (3 of 3 seeds tried).
+
+### 3.4 Linearizable reads: ReadIndex (`RaftNode.readIndex`)
+Reads never go through the log. The steps for one read:
+1. **Fix the read index.** Only once the leader has committed an entry from its current term
+   (its no-op), it records `readIndex = commitIndex`.
+   - Why wait: before that, the leader may not know which entries are committed, because a
+     previous leader may have committed entries this leader holds but has not yet seen as
+     committed.
+   - Reads that arrive earlier are queued, not rejected.
+2. **Confirm leadership with a heartbeat round that starts after the read arrived.**
+   - The leader numbers its rounds, and every AppendEntries carries the round number current
+     when it was sent. A read needs round `heartbeatRound + 1`.
+   - Any reply in the leader's term (success or not) from a peer counts as that peer's
+     acknowledgement of that round. The read waits for a majority (counting the leader).
+   - Why "after the read arrived": a reply to a message sent *before* the read proves only
+     that we were leader back then. A newer leader may have committed writes since.
+   - Reads that arrive together share one round.
+3. **Wait** until `lastApplied >= readIndex`.
+4. **Serve** the read from the state machine.
+
+Stepping down fails pending reads with `NOT_LEADER` (reads are safe to retry), and a 1 s
+timeout answers `UNKNOWN`.
+
+- `RaftReadIndexTest` drives a leader's network by hand to check each step:
+  - the no-op gate;
+  - that a reply to a pre-read AppendEntries does not confirm;
+  - that 1 of 4 peers is not a majority of 5;
+  - that stepping down fails the read;
+  - that concurrent reads share one round.
+- `KvClusterTest.deposedLeaderNeverServesAStaleRead` checks the end-to-end case. A leader is
+  partitioned with a reader while the majority elects a new leader and commits a newer value.
+  The old leader still believes it leads, but it cannot confirm, so the reader gets `Unknown`.
+  After the heal, the reader sees the new value. Making `readIndex` serve immediately makes this
+  test fail (3 of 3 seeds tried).
+
+### 3.5 Client library (`KvClient`)
+- **Async and single-threaded.** Callbacks run on the client's `Scheduler`, so the same client
+  runs inside the deterministic simulator (Phase 4's chaos harness) and in production.
+- **Redirects.** `NOT_LEADER` with a hint goes straight to the hinted leader. Without a hint, it
+  tries the next server after a short pause.
+- **No reply within 1.5 s:** try the next server, same sequence number.
+- **Late replies.** Replies to an abandoned attempt are ignored (attempt numbers).
+- **`common` module.** `Scheduler` moved into it so the client library depends only on
+  `common` and `proto`, not on `raft`.
+
+### 3.6 Simulated KV cluster (`kv` test fixtures: `SimKvCluster`)
+- **What it runs.** Real `RaftNode` + `KvStateMachine` (B-Tree with lazy fsync) + `KvService`
+  on each node, and real `KvClient`s, all on one seeded `Simulation`.
+- **Client traffic is simulated too.** Client requests and replies travel over `SimNetwork` via
+  its generic async `call()`, so they are dropped, delayed and partitioned like Raft messages.
+  Clients are network endpoints that can be partitioned along with servers.
+- **Always-on checks:** Election Safety after every event; State Machine Safety and in-order
+  apply on every apply.
+- **Sweep results.** All KV tests pass at 500 seeds (3,008 runs).
+
+## 4. Testing summary
+See §1.6 (storage), §2.3–2.5 (Raft), and §3 (KV). Phase 4 adds the linearizability checker
+and the chaos harness.
+
+## 5. Known limitations
+- **No PreVote and no CheckQuorum.**
+  - A node that was partitioned away keeps timing out and incrementing its term. When it
+    rejoins, its higher term forces the current leader to step down and an election to run,
+    even though the cluster was healthy.
+  - This is safe: the rejoining node cannot win unless its log is up to date. But it costs
+    availability: a few hundred milliseconds with no leader.
+  - In the other direction, without CheckQuorum a leader that loses its majority keeps
+    believing it leads. That is also safe: it cannot commit writes, and ReadIndex refuses to
+    serve reads without a confirming majority. Clients talking to it see timeouts until they
+    try another node.
+  - PreVote (Raft thesis §9.6) would fix the first issue, CheckQuorum (§6.2) the second.
+- **Session rows are never evicted.** Every client that ever wrote keeps an 18-byte row
+  forever. Long-lived deployments with many short-lived clients would need expiry, and expiry
+  must be decided *in the log* (for example a leader-proposed "expire sessions older than log
+  time T" entry), so that every replica evicts at the same point. Evicting by local wall-clock
+  time would break determinism.
+- **One outstanding request per client.** A client that wants concurrency uses several client
+  ids.
+- **Each read costs a heartbeat round to a majority** (no leader leases). A lease would save a
+  round trip but would depend on bounded clock drift.
+- **Deletes don't reclaim B-Tree space** (§1.3).
+
 ## To be written
-- The KV state machine and ReadIndex (Phase 3), the linearizability checker and chaos testing
-  (Phase 4), the gRPC transport and production threading model (Phase 5), snapshots (Phase 6),
-  and performance (Phase 7).
+- The linearizability checker and chaos testing (Phase 4), the gRPC transport and production
+  threading model (Phase 5), snapshots (Phase 6), and performance (Phase 7).

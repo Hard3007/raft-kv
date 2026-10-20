@@ -1,6 +1,6 @@
 package io.github.hard3007.raftkv.raft.sim;
 
-import io.github.hard3007.raftkv.raft.Scheduler;
+import io.github.hard3007.raftkv.common.Scheduler;
 import java.util.PriorityQueue;
 import java.util.Random;
 import java.util.function.BooleanSupplier;

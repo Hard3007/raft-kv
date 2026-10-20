@@ -7,11 +7,13 @@ import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
 import io.github.hard3007.raftkv.raft.RaftRpcHandler;
 import io.github.hard3007.raftkv.raft.Transport;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.function.Consumer;
-import java.util.function.Function;
+import java.util.function.BiFunction;
+import java.util.function.IntFunction;
 
 /**
  * A simulated network between nodes of one {@link Simulation}. It can:
@@ -26,8 +28,18 @@ import java.util.function.Function;
  * Connectivity is checked when a message is sent and again when it arrives, so a partition also
  * cuts off messages already in flight. Messages to a crashed node are lost, and replies to a node
  * that crashed and restarted are discarded.
+ *
+ * <p>Besides Raft RPCs, any request/reply exchange can travel over the network with
+ * {@link #call}, for example client requests to the KV service. Clients are endpoints too
+ * ({@link #registerEndpoint}), so they can be partitioned along with servers.
  */
 public final class SimNetwork {
+
+    /** The receiving side of {@link #call}: answers by calling {@code reply} at most once, now or later. */
+    @FunctionalInterface
+    public interface AsyncHandler<Q, R> {
+        void handle(Q request, Consumer<R> reply);
+    }
 
     /** Sees every request and reply; returns true to drop it. */
     @FunctionalInterface
@@ -37,7 +49,9 @@ public final class SimNetwork {
 
     private final Simulation simulation;
     private final Random random;
-    private final Map<Integer, RaftRpcHandler> handlers = new HashMap<>();
+    private final Map<Integer, RaftRpcHandler> raftHandlers = new HashMap<>();
+    /** Endpoints that are up (not crashed). */
+    private final Set<Integer> live = new HashSet<>();
     /** Incremented each time a node (re)registers, so replies to a dead incarnation are dropped. */
     private final Map<Integer, Long> incarnations = new HashMap<>();
     private final Map<Integer, Boolean> connected = new HashMap<>();
@@ -55,7 +69,13 @@ public final class SimNetwork {
 
     /** Attaches a (re)started node. Messages sent to it from now on are delivered to {@code handler}. */
     public void register(int nodeId, RaftRpcHandler handler) {
-        handlers.put(nodeId, handler);
+        registerEndpoint(nodeId);
+        raftHandlers.put(nodeId, handler);
+    }
+
+    /** Attaches a (re)started endpoint that is not a Raft node, such as a client. */
+    public void registerEndpoint(int nodeId) {
+        live.add(nodeId);
         incarnations.merge(nodeId, 1L, Long::sum);
         connected.putIfAbsent(nodeId, true);
         groupOf.putIfAbsent(nodeId, 0);
@@ -63,7 +83,8 @@ public final class SimNetwork {
 
     /** Detaches a crashed node: in-flight messages to it are lost. */
     public void unregister(int nodeId) {
-        handlers.remove(nodeId);
+        live.remove(nodeId);
+        raftHandlers.remove(nodeId);
         incarnations.merge(nodeId, 1L, Long::sum);
     }
 
@@ -134,32 +155,43 @@ public final class SimNetwork {
     }
 
     /**
-     * Delivers {@code request} from {@code from} to {@code to} after a delay, runs the handler
-     * there, and delivers the reply back after another delay, unless something along the way
-     * drops it.
+     * Delivers {@code request} from {@code from} to {@code to} after a delay, hands it to the
+     * handler that {@code handlerAt} returns for {@code to} at arrival time (null if there is none),
+     * and delivers the handler's reply back after another delay, unless something along the way
+     * drops it. The handler is looked up on arrival because the target may have restarted since.
      */
-    private <Q, R> void send(int from, int to, Q request, Function<RaftRpcHandler, R> handle, Consumer<R> onReply) {
+    public <Q, R> void call(int from, int to, Q request, IntFunction<AsyncHandler<Q, R>> handlerAt,
+            Consumer<R> onReply) {
         messagesSent++;
         long senderIncarnation = incarnations.get(from);
         if (!canTalk(from, to) || lost() || filter.drop(from, to, request)) {
             return;
         }
         simulation.schedule(delay(), () -> {
-            RaftRpcHandler target = handlers.get(to);
-            if (target == null || !canTalk(from, to)) {
+            AsyncHandler<Q, R> handler = live.contains(to) ? handlerAt.apply(to) : null;
+            if (handler == null || !canTalk(from, to)) {
                 return;
             }
-            R reply = handle.apply(target);
-            if (lost() || filter.drop(to, from, reply)) {
-                return;
-            }
-            simulation.schedule(delay(), () -> {
-                boolean senderStillAlive = handlers.containsKey(from) && incarnations.get(from) == senderIncarnation;
-                if (senderStillAlive && canTalk(from, to)) {
-                    onReply.accept(reply);
+            long receiverIncarnation = incarnations.get(to);
+            handler.handle(request, reply -> {
+                boolean receiverStillAlive = live.contains(to) && incarnations.get(to) == receiverIncarnation;
+                if (!receiverStillAlive || lost() || filter.drop(to, from, reply)) {
+                    return;
                 }
+                simulation.schedule(delay(), () -> {
+                    boolean senderStillAlive = live.contains(from) && incarnations.get(from) == senderIncarnation;
+                    if (senderStillAlive && canTalk(from, to)) {
+                        onReply.accept(reply);
+                    }
+                });
             });
         });
+    }
+
+    /** Adapts a synchronous Raft handler method on node {@code id} to an {@link AsyncHandler}. */
+    private <Q, R> AsyncHandler<Q, R> raftHandler(int id, BiFunction<RaftRpcHandler, Q, R> method) {
+        RaftRpcHandler handler = raftHandlers.get(id);
+        return handler == null ? null : (request, reply) -> reply.accept(method.apply(handler, request));
     }
 
     private final class SimTransport implements Transport {
@@ -171,12 +203,12 @@ public final class SimNetwork {
 
         @Override
         public void requestVote(int peer, RequestVoteRequest request, Consumer<RequestVoteReply> onReply) {
-            send(self, peer, request, handler -> handler.handleRequestVote(request), onReply);
+            call(self, peer, request, id -> raftHandler(id, RaftRpcHandler::handleRequestVote), onReply);
         }
 
         @Override
         public void appendEntries(int peer, AppendEntriesRequest request, Consumer<AppendEntriesReply> onReply) {
-            send(self, peer, request, handler -> handler.handleAppendEntries(request), onReply);
+            call(self, peer, request, id -> raftHandler(id, RaftRpcHandler::handleAppendEntries), onReply);
         }
     }
 }

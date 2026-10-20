@@ -24,10 +24,11 @@ who must be able to explain every line in interviews. **Readable code over cleve
 ## Module layout
 | Module | Contents |
 |---|---|
+| `common/` | `Scheduler` (time + timers), shared by server and client |
 | `proto/` | `raft.proto` (RequestVote, AppendEntries, InstallSnapshot) and `kv.proto` (Get/Put/Delete, `KvCommand` log payload) |
 | `storage/` | `Wal` (CRC32 records, configurable fsync, torn-tail truncation), pager + LRU page cache (4 KB pages), B-Tree (get/put/delete/range scan) |
-| `raft/` | `RaftNode` (Figure 2), Raft log, persistent state, `Transport`/`Scheduler`/`Clock` interfaces, `sim/` deterministic simulated network |
-| `kv/` | KV state machine on the B-Tree, session table, ReadIndex reads |
+| `raft/` | `RaftNode` (Figure 2 + ReadIndex), Raft log, persistent state, `Transport`/`RaftRpcHandler`/`StateMachine` interfaces, `sim/` deterministic simulated network |
+| `kv/` | KV state machine on the B-Tree, session table, `KvService`; test fixtures: `SimKvCluster` |
 | `client/` | `KvClient`: leader discovery, redirects, retries with the same sequence number |
 | `server/` | node `Main`: gRPC transport, config, HTTP `/status`, Logback |
 | `linearizability/` | history recorder + Wing-Gong-Lowe checker |
@@ -75,7 +76,8 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   The recovery tests were shown to catch three deliberate bugs (see DESIGN.md §1.4).
 - [x] **2. Raft core on the simulated network** — election, replication, persistence. All lab-style tests pass with
   50 seeds (1,121 runs; a 500-seed sweep of 11,021 runs also passed). Mutations M1–M4 are all caught (DESIGN.md §2.5).
-- [ ] **3. KV state machine** — sessions, ReadIndex reads (gated on the leader's no-op, which exists since Phase 2), client library.
+- [x] **3. KV state machine** — sessions, ReadIndex reads, client library, UNKNOWN outcomes. KV tests pass at 500 seeds
+  (3,008 runs); the Raft gate still passes at 50 seeds. See DESIGN.md §3 and §5 (known limitations).
 - [ ] **4. Linearizability checker + chaos harness** — checker self-tests (incl. pending ops), 500 chaos runs,
   deliberately break the system (e.g., follower reads), show it is caught, then revert. Add 50-seed chaos to CI.
 - [ ] **5. gRPC transport** — GATE: before any Docker work, an in-process integration test runs 5 nodes with real
@@ -87,18 +89,20 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
-- Done: Phases 0–2.
-- Next: Phase 3 (KV state machine, sessions, ReadIndex, client library). Waiting for the user to say "continue".
-- Phase 3 constraints (decided now):
-  - **Stay within the B-Tree limits** (key ≤ 256 B, value ≤ 1024 B). Data keys are a 1-byte prefix plus the user key,
-    so the API caps user keys at 255 B and values at 1024 B and rejects larger ones before proposing.
-    Session entries use the key `prefix + clientId (8 B)`, and their value is `lastSeq (8 B) + cached reply`.
-    The cached reply holds only a write's status and the `existed` flag, never a value, so it stays tiny.
-  - One B-Tree `WriteBatch` per applied entry: the data change, the session update, and `setAppliedIndex(index)`.
-  - On restart, Raft must resume with lastApplied = commitIndex = the B-Tree's appliedIndex
-    (RaftNode currently starts at 0; add a constructor parameter).
-  - ReadIndex waits for the leader's no-op to commit; reads never go through the log.
-
+- Done: Phases 0–3.
+- Next: Phase 4 (linearizability checker + chaos harness). Waiting for the user to say "continue".
+- Phase 4 plan (decided now):
+  - Checker: Wing-Gong-Lowe search per key, memoization, timeout. Operations whose client got
+    `KvResult.Unknown` (or no reply) are recorded as **pending with no return time** (decision 11),
+    with a self-test for that case. History timestamps come from the simulation's virtual clock.
+  - Chaos harness drives `SimKvCluster` (kv test fixtures) with several concurrent `KvClient`s.
+  - **Planned mutations; the checker must catch both** (then revert):
+    1. Serve reads without ReadIndex confirmation (`RaftNode.readIndex` calls `onReady()` at once,
+       or followers serve reads locally). Needs partitions that create deposed-but-unaware leaders.
+    2. No session dedup (`KvStateMachine` applies every copy of a write). Only observable when a
+       retried old write lands *after* a newer write to the same key, so the workload needs lost
+       replies / timeouts (retries) and several clients writing the same small key set.
+  - Show each mutation failing with a reproducible seed, and record the seeds in DESIGN.md.
 ## Known build warnings
 - `./gradlew build --warning-mode all` reports `Configuration.setVisible(boolean)` deprecations (removal in Gradle 11).
   All come from the third-party protobuf Gradle plugin 0.10.0 (`ProtobufPlugin.groovy`, `ToolsLocator.groovy`),
@@ -125,7 +129,20 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - Mutation testing (DESIGN.md §2.5): the no-op on election masks the Figure 8 bug under large batches, so the
   Figure 8 tests run with `maxEntriesPerAppend = 1`. Keep that when changing replication (Phase 7).
 
+## KV + client module map (Phase 3)
+- `common`: `Scheduler` (shared by server and client).
+- `kv`: `KvKeys` ('D' + key -> value; 'S' + clientId -> lastSeq|existed), `KvStateMachine` (one WriteBatch per
+  entry: data + session + appliedIndex; dedup rules; deterministic; syncs the tree every N entries), `KvService`
+  (Get via `RaftNode.readIndex`, Put/Delete via propose; statuses OK / NOT_LEADER / UNKNOWN / INVALID_ARGUMENT).
+- `kv` test fixtures: `SimKvCluster` (real nodes + clients on one Simulation; client RPCs over `SimNetwork.call`).
+- `raft`: `RaftNode.readIndex` (no-op gate, numbered heartbeat rounds, apply wait), `setOnLeadershipLost`,
+  constructor `appliedIndex`. `SimNetwork.call` is the generic async RPC; `registerEndpoint` for clients.
+- `client`: `KvClient` (async; one outstanding op; same seq on retry; follows hints), `ClientTransport`, `KvResult`.
+- Never report a definite failure for a write that might commit: only NOT_LEADER (not proposed) and
+  INVALID_ARGUMENT are definite.
+
 ## Commands
 - Build + all tests: `./gradlew build`
 - One module's tests: `./gradlew :storage:test`
 - Raft tests with N seeds each: `./gradlew :raft:test -PraftSeeds=50`
+- KV tests with N seeds each: `./gradlew :kv:test -PkvSeeds=50`

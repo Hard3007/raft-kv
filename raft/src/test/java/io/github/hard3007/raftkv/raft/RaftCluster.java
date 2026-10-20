@@ -110,7 +110,7 @@ final class RaftCluster {
         schedulers[i] = sim.newNodeScheduler();
         int nodeId = i;
         nodes[i] = new RaftNode(i, peers, configs[i], schedulers[i], network.transportFor(i), storage,
-                entry -> onApply(nodeId, entry), new Random(random.nextLong()));
+                entry -> onApply(nodeId, entry), 0, new Random(random.nextLong()));
         network.register(i, nodes[i]);
         nodes[i].start();
     }

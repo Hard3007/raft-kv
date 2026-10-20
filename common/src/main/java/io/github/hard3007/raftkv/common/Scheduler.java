@@ -1,4 +1,4 @@
-package io.github.hard3007.raftkv.raft;
+package io.github.hard3007.raftkv.common;
 
 /**
  * Time and timers for one node. In production this is a single-threaded executor and the real

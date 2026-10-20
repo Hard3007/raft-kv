@@ -1,6 +1,7 @@
 rootProject.name = "raft-kv"
 
 include(
+    "common",
     "proto",
     "storage",
     "raft",

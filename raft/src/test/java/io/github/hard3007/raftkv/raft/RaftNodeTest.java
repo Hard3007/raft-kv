@@ -49,7 +49,7 @@ class RaftNodeTest {
     /** Starts (or, after a crash, restarts) node 1 from whatever is on its disk. */
     private RaftNode boot() {
         RaftNode n = new RaftNode(1, List.of(2, 3), RaftConfig.defaults(), sim.newNodeScheduler(), SILENT,
-                RaftStorage.open(disk, "raft.wal"), applied::add, new Random(1));
+                RaftStorage.open(disk, "raft.wal"), applied::add, 0, new Random(1));
         n.start();
         return n;
     }

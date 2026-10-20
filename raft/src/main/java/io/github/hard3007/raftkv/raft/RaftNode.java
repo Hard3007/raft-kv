@@ -1,13 +1,16 @@
 package io.github.hard3007.raftkv.raft;
 
 import com.google.protobuf.ByteString;
+import io.github.hard3007.raftkv.common.Scheduler;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesReply;
 import io.github.hard3007.raftkv.proto.raft.AppendEntriesRequest;
 import io.github.hard3007.raftkv.proto.raft.EntryType;
 import io.github.hard3007.raftkv.proto.raft.LogEntry;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteReply;
 import io.github.hard3007.raftkv.proto.raft.RequestVoteRequest;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -81,14 +84,26 @@ public final class RaftNode implements RaftRpcHandler {
     private final Set<Integer> votesGranted = new HashSet<>();
     private Scheduler.Cancellable electionTimer;
     private Scheduler.Cancellable heartbeatTimer;
+    private Runnable onLeadershipLost = () -> { };
+
+    // ReadIndex state (leader only); see readIndex().
+    private final Deque<ReadIndexCallback> readsAwaitingNoop = new ArrayDeque<>();
+    private final Deque<PendingRead> readsAwaitingConfirmation = new ArrayDeque<>();
+    /** Number of heartbeat rounds this node has started for reads. Never decreases. */
+    private long heartbeatRound;
+    /** Per peer: the newest round whose AppendEntries that peer answered in our current term. */
+    private final Map<Integer, Long> acknowledgedRound = new HashMap<>();
+    private boolean heartbeatRoundScheduled;
 
     /**
-     * @param peers   ids of the other servers in the cluster (not including {@code id})
-     * @param storage opened storage; the node resumes from its recovered term, vote and log
-     * @param random  source of election-timeout jitter (seeded in simulation)
+     * @param peers        ids of the other servers in the cluster (not including {@code id})
+     * @param storage      opened storage; the node resumes from its recovered term, vote and log
+     * @param appliedIndex index of the last entry the state machine has durably applied (0 for a
+     *                     fresh or purely in-memory state machine); applying resumes after it
+     * @param random       source of election-timeout jitter (seeded in simulation)
      */
     public RaftNode(int id, List<Integer> peers, RaftConfig config, Scheduler scheduler, Transport transport,
-            RaftStorage storage, StateMachine stateMachine, Random random) {
+            RaftStorage storage, StateMachine stateMachine, long appliedIndex, Random random) {
         this.id = id;
         this.peers = List.copyOf(peers);
         this.config = config;
@@ -100,6 +115,19 @@ public final class RaftNode implements RaftRpcHandler {
         this.currentTerm = storage.currentTerm();
         this.votedFor = storage.votedFor();
         this.log = new RaftLog(storage.recoveredEntries());
+        if (appliedIndex > log.lastIndex()) {
+            // Impossible if entries are persisted before they are applied (see handleAppendEntries).
+            throw new IllegalStateException("state machine applied index " + appliedIndex
+                    + " is ahead of the durable Raft log (last index " + log.lastIndex() + ")");
+        }
+        // Everything the state machine applied was committed, so both indices can start there.
+        this.commitIndex = appliedIndex;
+        this.lastApplied = appliedIndex;
+    }
+
+    /** Runs on the node thread whenever this node stops being leader (to fail pending requests). */
+    public void setOnLeadershipLost(Runnable callback) {
+        this.onLeadershipLost = callback;
     }
 
     /** Starts the node as a follower. */
@@ -128,6 +156,112 @@ public final class RaftNode implements RaftRpcHandler {
         sendAppendEntriesToAll();
         advanceCommitIndex(); // a single-node cluster commits immediately
         return Optional.of(new Proposal(entry.getIndex(), entry.getTerm()));
+    }
+
+    // ================================================================== linearizable reads (ReadIndex)
+
+    /** Outcome of {@link #readIndex}. Exactly one method is called, on the node's thread. */
+    public interface ReadIndexCallback {
+        /** It is now safe to read the state machine: the result will be linearizable. */
+        void onReady();
+
+        /** This node is not (or stopped being) the leader. Reads change nothing, so retrying is safe. */
+        void onNotLeader();
+    }
+
+    /** A read whose read index is fixed and which waits for leadership confirmation, then for apply. */
+    private record PendingRead(long readIndex, long requiredRound, ReadIndexCallback callback) {
+    }
+
+    /**
+     * Prepares a linearizable read without writing to the log (ReadIndex, Raft thesis §6.4):
+     * <ol>
+     *   <li>Only once the leader has committed an entry from its current term (its no-op), record
+     *       readIndex = commitIndex. Before that, the leader may not know the latest committed
+     *       entries, so the read waits.
+     *   <li>Confirm leadership with a heartbeat round that starts after the read arrived: a
+     *       majority must answer an AppendEntries sent in that round (or later) in our term. A
+     *       newer leader could otherwise have committed writes this (deposed) node never saw.
+     *   <li>Wait until lastApplied >= readIndex.
+     *   <li>Call {@link ReadIndexCallback#onReady()}; the caller reads the state machine there.
+     * </ol>
+     */
+    public void readIndex(ReadIndexCallback callback) {
+        if (role != Role.LEADER) {
+            callback.onNotLeader();
+            return;
+        }
+        if (log.termAt(commitIndex) != currentTerm) {
+            readsAwaitingNoop.add(callback); // step 1 waits for our no-op to commit
+            return;
+        }
+        startRead(callback);
+    }
+
+    private void startRead(ReadIndexCallback callback) {
+        // Step 1: the read index. Step 2 needs a round numbered after every round started so far.
+        readsAwaitingConfirmation.add(new PendingRead(commitIndex, heartbeatRound + 1, callback));
+        scheduleHeartbeatRound();
+    }
+
+    /**
+     * Starts a new heartbeat round very soon. Reads that arrive before it starts share it, so a
+     * burst of reads costs one round of AppendEntries, not one per read.
+     */
+    private void scheduleHeartbeatRound() {
+        if (heartbeatRoundScheduled) {
+            return;
+        }
+        heartbeatRoundScheduled = true;
+        scheduler.schedule(0, () -> {
+            heartbeatRoundScheduled = false;
+            if (role == Role.LEADER) {
+                heartbeatRound++;
+                sendAppendEntriesToAll();
+                serveReadsIfPossible(); // a single-node cluster is its own majority
+            }
+        });
+    }
+
+    private void startReadsWaitingForNoop() {
+        if (log.termAt(commitIndex) != currentTerm) {
+            return;
+        }
+        while (!readsAwaitingNoop.isEmpty()) {
+            startRead(readsAwaitingNoop.poll());
+        }
+    }
+
+    /** Steps 2-4 for every read whose round a majority has confirmed and whose index is applied. */
+    private void serveReadsIfPossible() {
+        // Reads are queued in order of both requiredRound and readIndex, so stop at the first
+        // one that is not ready.
+        while (!readsAwaitingConfirmation.isEmpty()) {
+            PendingRead read = readsAwaitingConfirmation.peek();
+            if (!majorityAcknowledged(read.requiredRound()) || lastApplied < read.readIndex()) {
+                return;
+            }
+            readsAwaitingConfirmation.poll();
+            read.callback().onReady();
+        }
+    }
+
+    private boolean majorityAcknowledged(long round) {
+        int acknowledged = 1; // the leader itself
+        for (int peer : peers) {
+            if (acknowledgedRound.get(peer) >= round) {
+                acknowledged++;
+            }
+        }
+        return isMajority(acknowledged);
+    }
+
+    private void failPendingReads() {
+        List<ReadIndexCallback> failed = new ArrayList<>(readsAwaitingNoop);
+        readsAwaitingConfirmation.forEach(read -> failed.add(read.callback()));
+        readsAwaitingNoop.clear();
+        readsAwaitingConfirmation.clear();
+        failed.forEach(ReadIndexCallback::onNotLeader);
     }
 
     // ================================================================== RequestVote
@@ -351,6 +485,7 @@ public final class RaftNode implements RaftRpcHandler {
         for (int peer : peers) {
             nextIndex.put(peer, log.lastIndex() + 1);
             matchIndex.put(peer, 0L);
+            acknowledgedRound.put(peer, 0L);
         }
         logger.info("node={} event=became_leader term={} last_log_index={}", id, currentTerm, log.lastIndex());
 
@@ -381,6 +516,7 @@ public final class RaftNode implements RaftRpcHandler {
      * older term). The caller persists.
      */
     private void stepDown(long term) {
+        boolean wasLeader = role == Role.LEADER;
         if (term > currentTerm) {
             currentTerm = term;
             votedFor = NOBODY;
@@ -397,6 +533,10 @@ public final class RaftNode implements RaftRpcHandler {
             logger.debug("node={} event=step_down term={}", id, currentTerm);
         }
         role = Role.FOLLOWER;
+        if (wasLeader) {
+            failPendingReads();
+            onLeadershipLost.run();
+        }
     }
 
     private boolean isMajority(int count) {
@@ -440,10 +580,11 @@ public final class RaftNode implements RaftRpcHandler {
                 .addAllEntries(log.slice(next, lastToSend))
                 .setLeaderCommit(commitIndex)
                 .build();
-        transport.appendEntries(peer, request, reply -> onAppendEntriesReply(peer, request, reply));
+        long round = heartbeatRound; // this message counts toward rounds up to and including this one
+        transport.appendEntries(peer, request, reply -> onAppendEntriesReply(peer, request, round, reply));
     }
 
-    private void onAppendEntriesReply(int peer, AppendEntriesRequest request, AppendEntriesReply reply) {
+    private void onAppendEntriesReply(int peer, AppendEntriesRequest request, long round, AppendEntriesReply reply) {
         // [Fig2 All-2] If RPC response contains term T > currentTerm: set currentTerm = T, convert to follower.
         if (reply.getTerm() > currentTerm) {
             stepDown(reply.getTerm());
@@ -452,6 +593,13 @@ public final class RaftNode implements RaftRpcHandler {
         }
         if (role != Role.LEADER || request.getTerm() != currentTerm) {
             return; // a reply from an earlier term
+        }
+
+        // Any reply in our term, success or not, proves this peer still accepted us as leader
+        // when it answered. That is what ReadIndex counts.
+        if (round > acknowledgedRound.get(peer)) {
+            acknowledgedRound.put(peer, round);
+            serveReadsIfPossible();
         }
 
         if (reply.getSuccess()) {
@@ -525,12 +673,16 @@ public final class RaftNode implements RaftRpcHandler {
 
     /**
      * [Fig2 All-1] If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied]
-     * to state machine. Strictly in index order, each entry exactly once per incarnation.
+     * to state machine. Strictly in index order, each entry exactly once.
      */
     private void applyCommittedEntries() {
         while (lastApplied < commitIndex) {
             lastApplied++;
             stateMachine.apply(log.get(lastApplied));
+        }
+        if (role == Role.LEADER) {
+            startReadsWaitingForNoop();
+            serveReadsIfPossible();
         }
     }
 
