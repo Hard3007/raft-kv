@@ -816,20 +816,25 @@ needed, is shorter histories for those suites, not a longer timeout.
     the final stage needs no `RUN`.
   - The health check is `curl -fsS http://localhost:8080/status` (curl ships in the base image).
   - The JVM gets `-Xmx256m` plus caps on metaspace (64 MB), direct memory (32 MB, used by
-    Netty) and the code cache (32 MB). `SerialGC` suits a small heap on 2 cores, and the
+    Netty) and the code cache (64 MB). `SerialGC` suits a small heap on 2 cores, and the
     process exits on OOM rather than limping along.
+  - Phase 7 added `-Xms128m`, `-XX:MetaspaceSize=48m` and `-XX:SweeperThreshold=50` and raised
+    the code cache from 32 to 64 MB. Each one removes a full GC that stopped the node thread
+    (and its heartbeats) for 100-190 ms under load (§7.4).
 - **`docker stop`** sends SIGTERM to the JVM (PID 1, through `exec` in the start script). The
   shutdown hook checkpoints the B-Tree and closes cleanly. **`docker kill`** is SIGKILL.
 
 ### 5.5 The 5-node cluster (`docker-compose.yml`)
-- **Per node:** a 384 MB memory limit, a named volume `nodeN-data:/data`, a health check, and
-  `restart: unless-stopped`.
+- **Per node:** a 448 MB memory limit, a named volume `nodeN-data:/data`, a health check, and
+  `restart: unless-stopped`. (384 MB until Phase 7. The JVM caps now add up to 256 + 64 + 32
+  + 64 = 416 MB, so the limit went up; 5 x 448 MB = 2.24 GB, inside the 2.5 GB budget.)
 - **Ports.** gRPC 7001–7005 and `/status` 8081–8085 are published on the host.
   `CLUSTER=1=node1:7000,...` uses compose DNS names between containers. Leader hints carry node
   ids, so host-side clients map them to their own `localhost` addresses.
 - **Memory, measured with `docker stats`:**
   - about 77–90 MiB per container idle;
-  - a peak of **103–132 MiB per container** during the 180 s chaos run (limit 384 MiB);
+  - a peak of **103–132 MiB per container** during the 180 s chaos run (limit then 384 MiB;
+    Phase 7 load runs with `-Xms128m` peak at about 145–166 MiB);
   - 5 containers at peak use under 600 MiB in total;
   - with the cluster, Gradle and the IDE all running, the Codespace still had about 2.7 GB
     available.
@@ -959,6 +964,110 @@ networks, do not guarantee it.
 - **The leader learns nothing from an InstallSnapshot reply** (Figure 13 has no success flag), so a
   damaged transfer costs one failed AppendEntries before it restarts.
 - **Deletes don't reclaim B-Tree space** (§1.3).
+- **fsync and GC run on the node thread, between heartbeats.** A leader stuck in a slow fsync
+  (or a GC pause) sends no heartbeats. If that lasts longer than the minimum election timeout,
+  the followers elect a new leader; this happened under load on the Codespace's shared disk
+  (§7.4). **Future improvement (Raft thesis §10.2.1):**
+  - The leader writes its own log on a separate I/O thread, in parallel with replication, and
+    keeps sending heartbeats meanwhile.
+  - It counts itself toward a majority only once the write is durable. Group commit already
+    tracks exactly that, in `lastDurableIndex`.
+  - Followers still persist before replying.
+  - Not done: it changes the one-thread-per-node model (decision 2) and the simulator, so it
+    needs its own phase with fresh mutation tests.
 
-## To be written
-- Performance (Phase 7).
+## 7. Performance: batching, pipelining, group commit (Phase 7)
+
+The measurements, the method and the hardware are in BENCHMARKS.md. This section explains what
+changed in the code and why it is still safe.
+
+### 7.1 What the baseline did
+Before Phase 7 (now `MAX_APPENDS_IN_FLIGHT=0 GROUP_COMMIT=false`, kept so the before/after
+can be rerun on one image):
+- every `propose` fsynced its own entry on the leader's node thread, then
+- sent every follower an AppendEntries with everything from its `nextIndex` (up to 64
+  entries). `nextIndex` only moves when a reply arrives, so 16 proposals in a burst sent the same
+  entries up to 16 times, and each copy that brought at least one new entry cost the follower an
+  fsync too.
+
+On the Codespace this was fsync-bound: about 160 ops/s whether 16 or 64 clients were running.
+
+### 7.2 Batching and pipelining (`RaftConfig.maxAppendsInFlight`, `RaftNode.sendAppendEntries`)
+Per follower the leader keeps three numbers just for sending: how many AppendEntries carrying
+entries are unanswered (`appendsInFlight`), the last index sent (`sentIndex`), and when that
+window last moved.
+- **n = 1, batching.** One request at a time. Entries proposed meanwhile wait, and the answer
+  sends all of them in the next request (up to `maxEntriesPerAppend`).
+- **n > 1, pipelining** (default 4). The next batch leaves before the previous one is
+  answered, starting right after `sentIndex`, so no entry is sent twice.
+- **Heartbeats and ReadIndex rounds always go out**, even with a full window: then they carry no
+  entries and check the acknowledged position (`prevLogIndex = nextIndex - 1`).
+- **What did NOT change:** `nextIndex` and `matchIndex` move only when a reply arrives, and
+  `matchIndex` only on success, as `prevLogIndex + entries` of the request that succeeded
+  (Figure 2). Nothing is inferred from what was merely sent.
+- **Lost messages.** The transport never reports a loss. If requests are in flight to a peer
+  and none was answered for a minimum election timeout, the next heartbeat restarts the window
+  at `nextIndex`. A slow answer that arrives after that is handled normally; the entries were
+  just sent twice.
+- **Reordering.** gRPC may deliver two pipelined requests out of order. The later one is then
+  refused (the follower lacks its `prevLogIndex`). A refusal of a request sent beyond the
+  acknowledged position restarts the window at `nextIndex`; the earlier request still succeeds
+  on its own. A refusal for a position already acknowledged is stale and ignored.
+
+### 7.3 Group commit (`RaftConfig.groupCommit`, `RaftNode.scheduleFlush`)
+- `propose` appends to the in-memory log and schedules ONE flush task. Proposals that arrive
+  while the node thread is busy (for example inside the previous fsync) are queued ahead of
+  that task, so the flush writes all of them in one WAL record with one fsync.
+- **The leader counts itself only for durable entries.** `advanceCommitIndex` starts at
+  `lastDurableIndex()`, so Leader-4's "replicas = 1 (the leader)" is true.
+- **A follower never gets an entry the leader has not persisted** (`sendAppendEntries` sends up
+  to `lastDurableIndex()`). This keeps the old invariant "no node applies beyond its own durable
+  log": without it, 3 followers could commit an entry the leader then loses in a crash, while the
+  leader had already applied it.
+- **Before anything else touches the log, pending entries are written:** at step-down (a new
+  leader's AppendEntries may truncate next) and before a snapshot rewrites the WAL. They are
+  uncommitted entries, which a deposed leader may keep.
+- Followers already wrote each AppendEntries with one fsync; batching makes those fewer too.
+
+### 7.4 Elections under load: the investigation
+Every benchmark records the term and leader before and after its window. The first baseline run
+at 1 KB values changed leader under load, so I stopped to find out why before measuring the
+optimizations.
+- **Instrumentation added:**
+  - `ExecutorScheduler` measures every task: the longest one, how late tasks start, and the
+    number of tasks of 50 ms or more, all exposed in `/status`;
+  - `DiskFileSystem` logs every fsync or write of 50 ms or more (`event=slow_fsync`);
+  - `RaftNode` logs every election timeout with the time since it last heard from the leader.
+- **What it showed (Codespace).** The leader's node thread ran single tasks of 0.5-1.3 s. During
+  one of them its followers waited 161-168 ms without a heartbeat, timed out, and elected a new
+  leader. PreVote did not prevent it: the majority really had not heard from the leader.
+- **Two causes.**
+  1. **fsync stalls.** In 30 s of load there were 155 fsyncs of 50 ms or more (median 71 ms,
+     max 479 ms). The same disk answers in 0.8 ms (p50) when idle (FsyncProbe). Five nodes'
+     fsyncs and page writes queue on one virtual disk (a loop device in Docker-in-Docker).
+     Batching and group commit reduce the NUMBER of fsyncs but cannot make one faster.
+  2. **GC pauses**, all avoidable by configuration. Serial GC full collections, 50-190 ms each:
+     the code cache reaching its threshold (32 MB cap), metaspace reaching its first threshold,
+     and the heap growing from its 6 MB default. Fixed in the Dockerfile (§5.4). What remains is
+     CPU starvation: 2 cores for 5 nodes and the load generator.
+- **In Raft terms:** the paper's timing requirement is broadcastTime << electionTimeout. Here an
+  fsync inside the "broadcast" sometimes takes longer than the whole 150-300 ms timeout.
+- **Decision (with the user):** keep the design and the paper's timeout, report elections in
+  every benchmark, and include an fsync probe in every report. If the Oracle VM also shows
+  elections under load, its benchmarks run with a larger `ELECTION_TIMEOUT_MS` (configurable
+  since Phase 7; default 150-300 everywhere, including all tests and chaos), and each report
+  states the value. Moving the leader's fsync off the node thread is the real fix (§6).
+
+### 7.5 Tests
+- `RaftReplicationFlowTest` drives single messages by hand: the window limit and batching,
+  pipelining without resends, commit only on successful replies (also out of order), restart
+  after a refused pipelined request, resend after a presumed loss, one fsync per burst, no
+  undurable entries sent, a single-node leader commits only after its flush, and step-down
+  writes pending entries. Four deliberate mutations (no window limit, sending undurable entries,
+  counting an undurable self, never expiring lost requests) each fail at least one test.
+- Tests that drive Figure 2 message by message (`RaftNodeTest.FIGURE_2_ONLY`) use the baseline
+  settings. The deterministic Figure 8 scenario also turns group commit off: its message filter
+  decides at SEND time from the receiver's log, and group commit sends the no-op in a separate
+  message that can be overtaken. Everything else, including the randomized Figure 8 test (one
+  entry per AppendEntries) and all chaos, runs with the new defaults.
+- Mutations M1-M4 (§2.5) rerun on the new code: all still caught, at the same rates.

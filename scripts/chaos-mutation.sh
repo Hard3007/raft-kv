@@ -12,7 +12,8 @@
 #   compact-before-snapshot   the log prefix is discarded before the snapshot covering it is durable
 #   accept-misattributed-replies  replies are counted as the addressed peer's, whoever sent them
 #
-# The report goes to reports/chaos/chaos-mutation-<mutation>-<runs>-seeds.md.
+# The report goes to reports/chaos/chaos-mutation-<mutation>-<runs>-seeds-<commit>-<UTC time>.md;
+# this script appends the exact source change to it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -66,7 +67,13 @@ diff "$backup" "$file" || true
   | grep -E "^chaos:|LINEARIZABLE=|runs done$" || true
 
 # Make the report self-describing: the "uncommitted changes" in its header are exactly this diff.
-report="reports/chaos/chaos-mutation-$mutation$(echo "$extra" | sed "s/-PcheckQuorum=false/-no-checkquorum/")-$runs-seeds.md"
+# Append to the report THIS run just wrote (the newest one with this prefix), never to an older one.
+prefix="reports/chaos/chaos-mutation-$mutation$(echo "$extra" | sed "s/-PcheckQuorum=false/-no-checkquorum/")-$runs-seeds-"
+report=$(ls -t "$prefix"*.md 2>/dev/null | head -1)
+if [[ -z "$report" || $(( $(date +%s) - $(stat -c %Y "$report") )) -gt 60 ]]; then
+  echo "no fresh report found for $prefix*.md; not appending the diff anywhere" >&2
+  exit 1
+fi
 {
   echo
   echo "## Mutation applied"

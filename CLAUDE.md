@@ -88,17 +88,28 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - [x] **6. Snapshots + log compaction** — InstallSnapshot (Figure 13), WAL compaction, crash at every I/O step of
   creation (14) and installation (113), compact-before-snapshot mutation caught; 500/500 chaos with snapshots. DESIGN.md §2.6.
 - [ ] **7. Benchmarks + failover + optimizations** (AppendEntries batching/pipelining, group-commit fsync; before/after).
-  Sanity runs in Codespaces; give exact commands for the Oracle VM.
+  Code, tests and Codespace sanity runs done (BENCHMARKS.md, DESIGN.md §7). Remaining: the Oracle VM runs (user runs
+  them; commands in BENCHMARKS.md §6), then the final evidence on the final commit.
 - [ ] **8. Docs + deploy** — README, DESIGN.md, INTERVIEW_NOTES.md, DEPLOY.md, status page, Oracle deploy.
 - At the very end: print resume numbers (chaos runs, ops/sec, p99, failover time) with the exact command and machine for each.
 
 ## Status
 - Done: Phases 0–6, plus PreVote and CheckQuorum (between Phases 5 and 6).
-- Next: Phase 7 (benchmarks, failover, AppendEntries batching/pipelining, group commit). Waiting for "continue".
-- Phase 7 reminders:
-  - The Figure 8 tests must keep `maxEntriesPerAppend = 1` (DESIGN.md §2.5) when replication changes.
-  - Pipelining must never infer matchIndex from anything but a successful AppendEntries (§2.6 rule).
+- In progress: Phase 7. The user runs the Oracle VM benchmarks (VM.Standard.A1.Flex, 2 OCPU = 2 ARM cores, 11 GiB,
+  no swap, default boot volume, Phoenix AD-1, SSH as ubuntu, only SSH open).
+- Phase 7 rules:
+  - The Figure 8 tests keep `maxEntriesPerAppend = 1` (DESIGN.md §2.5). The deterministic Figure 8 scenario also
+    turns group commit off (its filter decides at send time; DESIGN.md §7.5).
+  - matchIndex moves only on a successful AppendEntries reply; nothing is inferred from sends (§7.2).
+  - With group commit a follower never gets an entry the leader has not persisted, and the leader counts itself only
+    for durable entries (§7.3).
   - Final resume numbers come only from the Oracle VM; Codespaces runs are labeled sanity checks.
+  - Elections under load (DESIGN.md §7.4): on the Codespace, fsync stalls (up to ~0.5 s on the shared loop disk) block
+    the leader's node thread past the 150 ms timeout. Decision: keep 150-300 ms as the default and in ALL tests and
+    chaos. Only if the Oracle VM also shows elections, run its benchmarks with a larger `ELECTION_TIMEOUT_MS` and say
+    so in every report. Async leader fsync (thesis §10.2.1) is future work only (DESIGN.md §6).
+  - The VS Code Java server and Kotlin daemon leave ~2 GB free: a chaos mutation run (1 GB heap) can get SIGTERM
+    (exit 143, no result line). Stop the Kotlin daemon (by PID, not `pkill -f`) before memory-heavy runs.
 - **FIXED: replies counted for the wrong node** (found by Docker chaos; DESIGN.md §5.8). Every Raft reply carries
   `responder_id` and reply handlers drop replies from anyone but the peer asked. Chaos injects stale routes; the
   `accept-misattributed-replies` mutation is caught. Never identify a peer by the connection a reply came on.
@@ -189,6 +200,18 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
 - KV tests with N seeds each: `./gradlew :kv:test -PkvSeeds=50`
 - Chaos suite: `./gradlew chaos -Pruns=500` (report in `reports/chaos/`); replay one seed:
   `./gradlew chaos -Pruns=1 -PstartSeed=<seed> -Pverbose` (prints the fault log and, if it failed, the witness)
-- Mutation runs: `scripts/chaos-mutation.sh <reads-without-readindex|no-session-dedup|follower-reads|compact-before-snapshot> 500 [-PcheckQuorum=false]`
+- Mutation runs: `scripts/chaos-mutation.sh <reads-without-readindex|no-session-dedup|follower-reads|compact-before-snapshot|accept-misattributed-replies> 500 [-PcheckQuorum=false]`
+- Benchmarks (cluster must be down; each starts fresh ones): `scripts/bench.sh compare|fixed|sweep [label]`,
+  `scripts/failover.sh [trials] [label]`; reports in `reports/bench/` (with node logs). Quick checks: `RUNS=1`.
 - Docker image: `scripts/docker-build.sh` (multi-arch verify + load; ~4.5 min cold) or `scripts/docker-build.sh --local`
 - Docker cluster: `docker compose -p raftkv up -d`; Docker chaos: `scripts/docker-chaos.sh 180`
+
+## Benchmarks map (Phase 7)
+- `bench`: `Main` (`load`, `failover`), `LoadBenchmark` (closed loop, warm-up, window, term before/after),
+  `FailoverBenchmark` (kill leader; clock from its last successful /status), `ClusterProbe` (/status, docker),
+  `Reports` (Markdown + CSV, never overwritten), `Stats`. `server.FsyncProbe` (fsync latency, run in a container).
+- `raft`: `RaftConfig.maxAppendsInFlight` (0 = baseline, 1 = batching, 4 = default pipelining) and `groupCommit`
+  (default on). Env: `MAX_APPENDS_IN_FLIGHT`, `GROUP_COMMIT`, `ELECTION_TIMEOUT_MS` (default `150-300`).
+- Instrumentation: `ExecutorScheduler` slowest task / latest start / slow tasks (in /status); `DiskFileSystem` logs
+  fsyncs and writes of 50 ms or more; `RaftNode` logs `event=election_timeout` with time since leader contact.
+- Tests: `RaftReplicationFlowTest` (message by message; 4 mutations caught). `RaftNodeTest.FIGURE_2_ONLY` = baseline.
