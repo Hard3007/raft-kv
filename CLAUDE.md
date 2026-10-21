@@ -108,6 +108,8 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
     the leader's node thread past the 150 ms timeout. Decision: keep 150-300 ms as the default and in ALL tests and
     chaos. Only if the Oracle VM also shows elections, run its benchmarks with a larger `ELECTION_TIMEOUT_MS` and say
     so in every report. Async leader fsync (thesis §10.2.1) is future work only (DESIGN.md §6).
+  - JVM thread flags (BENCHMARKS.md §4.1): measured on Oracle, no real gain (C1-only -25%). Keep
+    `NODE_JVM_FLAGS` empty; the Codespace "gain" was noise. Oracle: steal 19-21%, no elections in 9 runs.
   - The VS Code Java server and Kotlin daemon leave ~2 GB free: a chaos mutation run (1 GB heap) can get SIGTERM
     (exit 143, no result line). Stop the Kotlin daemon (by PID, not `pkill -f`) before memory-heavy runs.
 - **FIXED: replies counted for the wrong node** (found by Docker chaos; DESIGN.md §5.8). Every Raft reply carries

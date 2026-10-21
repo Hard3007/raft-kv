@@ -112,7 +112,55 @@ How they work and why they stay safe: DESIGN.md §7.
 
 ## 4. Oracle Cloud VM (final numbers)
 
-To be filled in from the reports in `reports/bench/` once they have been run on the VM.
+VM.Standard.A1.Flex, 2 OCPU (2 Ampere ARM cores), 11 GiB RAM, no swap, default boot volume,
+Ubuntu 24.04 aarch64, Phoenix AD-1. Each report's header describes the machine and disk, and
+gives the fsync probe result from just before the run.
+
+### 4.1 JVM thread flags for the nodes (decision: keep the defaults)
+
+`scripts/bench.sh fixed` on commit 2b008db, three settings, 3 runs each: 16 clients, 50% reads /
+50% writes, 100 B values, 60 s cluster warm-up, 30 s measured. **0 of the 9 runs had a term or
+leader change.** Median of 3 runs, min–max in parentheses:
+
+| `NODE_JVM_FLAGS` | ops/s | p50 ms (read / write) | p99 ms | p99.9 ms | r | idle % | steal % |
+|---|---|---|---|---|---|---|---|
+| none (default) | 707 (641–730) | 20.88 (18.67 / 22.77) | 61.70 | 184.32 | 10 | 5 | 21 |
+| (1) `-XX:ActiveProcessorCount=1` + (2) `-Dio.grpc.netty.shaded.io.netty.eventLoopThreads=1` | 733 (652–765) | 20.32 (18.08 / 22.24) | 75.84 | 161.79 | 10 | 5 | 20 |
+| (1) + (2) + `-XX:TieredStopAtLevel=1` (C1 JIT only) | 529 (528–530) | 28.53 (25.98 / 30.93) | 72.32 | 147.84 | 9 | 5 | 19 |
+
+Reports: `reports/bench/load-jvm-default-*`, `load-jvm-1cpu-*`, `load-jvm-c1-*`. *(These are
+on the VM and still to be added to the repo; the figures above were sent from them and will be
+checked against the files when they arrive.)*
+
+- **Decision: keep the default JVM flags** (empty `NODE_JVM_FLAGS`).
+  - (1) + (2) is within noise: its ops/s range (652–765) overlaps the default's (641–730), and
+    its p99 is worse while its p99.9 is better.
+  - C1-only costs about 25% of throughput. Without C2, the compiled code is slower, and on a
+    CPU-bound machine that matters more than the CPU the C2 compiler saves.
+- **The Codespace gain did not reproduce.** On the Codespace, (1) + (2) looked like +47% ops/s
+  and 42% less node CPU per operation (§5). Those were single runs, each with an election in its
+  window, on a noisier machine. Three runs on the Oracle VM without elections show no real
+  difference. Fewer JVM threads is not where this setup's CPU goes.
+- **CPU-bound, with steal.** Across these runs about 10 threads were runnable for 2 cores, idle
+  was about 5%, and **steal was 19–21%**: the hypervisor gave about a fifth of our CPU time to
+  other guests. Every number in this section was measured under that.
+- Reads are faster than writes (p50 18.7 vs 22.8 ms with the defaults). A read costs one
+  heartbeat round and no fsync; a write needs an fsync on the leader and on a majority of
+  followers. ReadIndex starts its confirmation round at once, without waiting for the 50 ms
+  heartbeat timer (DESIGN.md §3.4).
+
+### 4.2 The optimizations, before and after
+
+To be filled in from `scripts/bench.sh compare`, run with the default JVM flags.
+
+### 4.3 Throughput vs. latency, and 1 KB values
+
+To be filled in from `scripts/bench.sh sweep`.
+
+### 4.4 Failover
+
+To be filled in from `scripts/failover.sh 50`.
+
 
 ## 5. Codespace sanity checks (not resume numbers)
 
@@ -157,7 +205,8 @@ threads per node made each operation cheaper. Every run had an election in its w
 | the same plus `-XX:TieredStopAtLevel=1` (C1 JIT only) | 438 | 26.4 | 31.6 | 175 | 1.7 ms |
 | the first line's flags on the load generator too (`BENCH_JVM_FLAGS`) | 399 | 27.4 | 33.3 | 274 | 2.5 ms |
 
-The defaults stay unchanged until the Oracle VM has measured these with 3 runs each.
+**This did not hold up on the Oracle VM.** Three runs per setting there showed no real gain for
+the first flags and a 25% loss for C1-only, so the defaults stay (§4.1).
 
 Earlier baseline runs on f790266 before any Phase 7 change
  (`load-baseline-sanity-*`,

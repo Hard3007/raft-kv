@@ -1060,7 +1060,9 @@ optimizations.
   gRPC/Netty threads used 2-3 times the CPU of the Raft node thread. With fewer JVM threads per
   node (`-XX:ActiveProcessorCount=1`, one Netty event loop), node CPU per operation fell from
   about 3.8 to 2.2 ms in one sanity run each (BENCHMARKS.md §5). That is config only, through
-  `NODE_JVM_FLAGS`; the defaults stay unchanged until the Oracle VM has measured it.
+  `NODE_JVM_FLAGS`. **On the Oracle VM it made no real difference** (3 runs each, no elections:
+  707 vs 733 ops/s, ranges overlapping), and C1-only cost 25% of throughput, so the JVM flags
+  stay at their defaults (BENCHMARKS.md §4.1). The Codespace gain came from single, noisy runs.
 - **In Raft terms:** the paper's timing requirement is broadcastTime << electionTimeout. Here the
   "broadcast" includes waiting for a CPU, which sometimes takes longer than the whole 150-300 ms
   timeout.
