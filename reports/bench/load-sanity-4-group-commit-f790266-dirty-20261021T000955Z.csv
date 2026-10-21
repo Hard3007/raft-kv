@@ -1,0 +1,2 @@
+label,clients,read_percent,value_bytes,run,operations,reads,writes,ops_per_s,p50_ms,p99_ms,p999_ms,max_ms,read_p99_ms,write_p99_ms,failures,term_start,leader_start,term_end,leader_end
+sanity-4-group-commit,16,50,100,1,5199,2570,2629,173.3,72.383,460.543,1208.319,1230.847,459.007,466.687,0,1,2,8,5

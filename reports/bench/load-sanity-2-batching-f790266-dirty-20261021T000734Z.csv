@@ -1,0 +1,2 @@
+label,clients,read_percent,value_bytes,run,operations,reads,writes,ops_per_s,p50_ms,p99_ms,p999_ms,max_ms,read_p99_ms,write_p99_ms,failures,term_start,leader_start,term_end,leader_end
+sanity-2-batching,16,50,100,1,5416,2712,2704,180.5,71.551,424.447,1137.663,1179.647,327.935,439.039,0,4,2,5,2

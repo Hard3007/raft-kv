@@ -1,0 +1,5 @@
+label,clients,read_percent,value_bytes,run,operations,reads,writes,ops_per_s,p50_ms,p99_ms,p999_ms,max_ms,read_p99_ms,write_p99_ms,failures,term_start,leader_start,term_end,leader_end
+baseline-sanity-100B,1,50,100,1,6297,3102,3195,209.9,4.009,20.303,102.783,157.823,8.863,32.623,0,5,5,5,5
+baseline-sanity-100B,4,50,100,1,4309,2207,2102,143.6,15.335,268.543,528.895,675.839,272.895,259.455,0,5,5,5,5
+baseline-sanity-100B,16,50,100,1,4914,2424,2490,163.8,47.679,559.615,983.039,989.695,610.815,531.967,0,5,5,5,5
+baseline-sanity-100B,64,50,100,1,4848,2414,2434,161.6,383.487,874.495,982.015,1504.255,885.759,869.375,0,5,5,5,5
