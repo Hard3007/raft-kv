@@ -9,9 +9,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** {@link FileSystem} backed by a real directory. */
 public final class DiskFileSystem implements FileSystem {
+
+    private static final Logger log = LoggerFactory.getLogger(DiskFileSystem.class);
+    /** An fsync at least this slow is logged (it blocks the node thread for that long). */
+    private static final long SLOW_FSYNC_MILLIS = 50;
 
     private final Path directory;
 
@@ -35,7 +41,7 @@ public final class DiskFileSystem implements FileSystem {
                 // A new file's directory entry is only durable once the directory is fsynced.
                 forceDirectory();
             }
-            return new DiskFile(channel);
+            return new DiskFile(channel, name);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -85,9 +91,11 @@ public final class DiskFileSystem implements FileSystem {
     private static final class DiskFile implements StorageFile {
 
         private final FileChannel channel;
+        private final String name;
 
-        DiskFile(FileChannel channel) {
+        DiskFile(FileChannel channel, String name) {
             this.channel = channel;
+            this.name = name;
         }
 
         @Override
@@ -109,8 +117,13 @@ public final class DiskFileSystem implements FileSystem {
         public void write(long position, byte[] src, int offset, int length) {
             ByteBuffer buffer = ByteBuffer.wrap(src, offset, length);
             try {
+                long start = System.nanoTime();
                 while (buffer.hasRemaining()) {
                     channel.write(buffer, position + buffer.position() - offset);
+                }
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                if (millis >= SLOW_FSYNC_MILLIS) { // a plain write blocks when the kernel throttles dirty pages
+                    log.info("event=slow_write file={} ms={} bytes={}", name, millis, length);
                 }
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
@@ -140,7 +153,12 @@ public final class DiskFileSystem implements FileSystem {
             try {
                 // force(false) is fdatasync on Linux: it flushes the data plus the metadata
                 // (such as file length) needed to read it back, skipping timestamps.
+                long start = System.nanoTime();
                 channel.force(false);
+                long millis = (System.nanoTime() - start) / 1_000_000;
+                if (millis >= SLOW_FSYNC_MILLIS) {
+                    log.info("event=slow_fsync file={} ms={} bytes={}", name, millis, channel.size());
+                }
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }

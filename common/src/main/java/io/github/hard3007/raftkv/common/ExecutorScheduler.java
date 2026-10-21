@@ -26,6 +26,11 @@ public final class ExecutorScheduler implements Scheduler, Executor, AutoCloseab
     private final Thread thread;
     private final String name;
     private final AtomicLong failedTasks = new AtomicLong();
+    // How busy the thread is (for /status and benchmarks): a long task delays everything queued
+    // behind it, including heartbeats and election timers.
+    private final AtomicLong slowestTaskMillis = new AtomicLong();
+    private final AtomicLong latestTimerMillis = new AtomicLong();
+    private final AtomicLong slowTasks = new AtomicLong();
     private volatile boolean closing;
 
     public ExecutorScheduler(String name) {
@@ -54,7 +59,8 @@ public final class ExecutorScheduler implements Scheduler, Executor, AutoCloseab
             return () -> { }; // a stopped node runs nothing
         }
         try {
-            ScheduledFuture<?> future = executor.schedule(guarded(task), delayMillis, TimeUnit.MILLISECONDS);
+            long due = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delayMillis);
+            ScheduledFuture<?> future = executor.schedule(guarded(task, due), delayMillis, TimeUnit.MILLISECONDS);
             return () -> future.cancel(false);
         } catch (RejectedExecutionException e) {
             return () -> { }; // lost a race with close(): the node is stopping
@@ -70,7 +76,7 @@ public final class ExecutorScheduler implements Scheduler, Executor, AutoCloseab
             return;
         }
         try {
-            executor.execute(guarded(task));
+            executor.execute(guarded(task, System.nanoTime()));
         } catch (RejectedExecutionException e) {
             // lost a race with close(): the node is stopping
         }
@@ -89,9 +95,13 @@ public final class ExecutorScheduler implements Scheduler, Executor, AutoCloseab
         }
     }
 
-    /** An exception in a task would silently kill nothing but that task; log it loudly instead. */
-    private Runnable guarded(Runnable task) {
+    /**
+     * An exception in a task would silently kill nothing but that task; log it loudly instead.
+     * Also measures how late the task started (for timers) and how long it ran.
+     */
+    private Runnable guarded(Runnable task, long dueNanos) {
         return () -> {
+            long start = System.nanoTime();
             try {
                 task.run();
             } catch (RuntimeException | Error e) {
@@ -100,8 +110,47 @@ public final class ExecutorScheduler implements Scheduler, Executor, AutoCloseab
                     log.error("executor={} event=task_failed", name, e);
                 }
                 throw e;
+            } finally {
+                record(start, dueNanos);
             }
         };
+    }
+
+    private void record(long start, long dueNanos) {
+        long ranMillis = (System.nanoTime() - start) / 1_000_000;
+        long lateMillis = Math.max(0, (start - dueNanos) / 1_000_000);
+        if (ranMillis >= SLOW_TASK_MILLIS) {
+            slowTasks.incrementAndGet();
+            if (ranMillis >= 2 * SLOW_TASK_MILLIS) {
+                log.info("executor={} event=slow_task ms={} started_late_ms={}", name, ranMillis, lateMillis);
+            }
+        }
+        if (ranMillis > slowestTaskMillis.get()) {
+            slowestTaskMillis.set(ranMillis); // only this thread writes it
+            log.info("executor={} event=slowest_task_so_far ms={}", name, ranMillis);
+        }
+        if (lateMillis > latestTimerMillis.get()) {
+            latestTimerMillis.set(lateMillis);
+            log.info("executor={} event=latest_task_start_so_far ms={}", name, lateMillis);
+        }
+    }
+
+    /** Tasks that ran at least this long count as slow: as long as a typical heartbeat interval. */
+    public static final long SLOW_TASK_MILLIS = 50;
+
+    /** The longest any single task has run, in ms. */
+    public long slowestTaskMillis() {
+        return slowestTaskMillis.get();
+    }
+
+    /** The most any task (a timer or a posted task) started after it was due, in ms. */
+    public long latestTaskStartMillis() {
+        return latestTimerMillis.get();
+    }
+
+    /** Tasks that ran for {@link #SLOW_TASK_MILLIS} or longer. */
+    public long slowTasks() {
+        return slowTasks.get();
     }
 
     /** Tasks that threw (excluding those cut short by {@link #close()}). Tests assert this stays 0. */

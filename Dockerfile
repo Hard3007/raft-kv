@@ -22,11 +22,15 @@ COPY --from=build --chown=1000:1000 /data-skeleton /data
 USER 1000:1000
 
 # Heap 256 MB. Netty's direct buffers, metaspace and the JIT code cache live outside the heap,
-# so they are capped too, keeping the process well inside a 384 MB container limit.
+# so they are capped too: 256 + 64 + 32 + 64 = 416 MB, inside the 448 MB container limit.
+# Every GC pause stops the node thread (and its heartbeats), so avoid the avoidable ones
+# (measured in Phase 7, see BENCHMARKS.md): -Xms128m stops the heap from starting at 6 MB and
+# growing through full GCs; MetaspaceSize=48m (default 21 MB) and SweeperThreshold=50 (default
+# 15% of the code cache) stop full GCs triggered while classes load and the JIT warms up.
 ENV DATA_DIR=/data \
     GRPC_PORT=7000 \
     STATUS_PORT=8080 \
-    JAVA_OPTS="-Xmx256m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=32m -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError"
+    JAVA_OPTS="-Xms128m -Xmx256m -XX:MetaspaceSize=48m -XX:MaxMetaspaceSize=64m -XX:MaxDirectMemorySize=32m -XX:ReservedCodeCacheSize=64m -XX:SweeperThreshold=50 -XX:+UseSerialGC -XX:+ExitOnOutOfMemoryError"
 EXPOSE 7000 8080
 VOLUME /data
 HEALTHCHECK --interval=5s --timeout=2s --start-period=20s --retries=3 \

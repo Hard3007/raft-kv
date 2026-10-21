@@ -30,7 +30,12 @@ final class StatusServer implements AutoCloseable {
                     respond(exchange, 503, "{\"error\":\"node not responding\"}");
                     return;
                 }
-                respond(exchange, 200, toJson(status));
+                String json = toJson(status);
+                // How busy the node thread has been since start (slow tasks delay heartbeats).
+                json = json.substring(0, json.length() - 1) + ",\"slowestTaskMs\":" + nodeThread.slowestTaskMillis()
+                        + ",\"latestTaskStartMs\":" + nodeThread.latestTaskStartMillis() + ",\"slowTasks\":"
+                        + nodeThread.slowTasks() + "}";
+                respond(exchange, 200, json);
             }
         });
         server.start();
