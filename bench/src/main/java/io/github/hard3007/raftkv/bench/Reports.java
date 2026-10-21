@@ -17,17 +17,23 @@ final class Reports {
     private Reports() {
     }
 
-    static void writeLoad(Path report, String label, String command, String setup, Duration warmup, Duration measure,
-            int runs, List<LoadBenchmark.RunResult> results, Map<Integer, ClusterProbe.NodeStatus> nodes)
-            throws IOException {
+    static void writeLoad(Path report, String label, String command, String setup, Duration clusterWarmup,
+            Duration warmup, Duration measure, int runs, List<LoadBenchmark.RunResult> results,
+            Map<Integer, ClusterProbe.NodeStatus> nodes) throws IOException {
         StringBuilder md = header("Load benchmark: " + label, command, setup);
         md.append("- **Method:** closed loop (each client sends its next operation as soon as the previous one is"
-                + " answered, no think time); ").append(warmup.toSeconds()).append(" s warm-up (not recorded), then a ")
-                .append(measure.toSeconds()).append(" s measurement window; ").append(runs)
+                + " answered, no think time). Warm-up, not recorded: ").append(clusterWarmup.toSeconds())
+                .append(" s before the first run on the fresh cluster (the nodes' JIT), ").append(warmup.toSeconds())
+                .append(" s before every later run. Then a ").append(measure.toSeconds())
+                .append(" s measurement window; ").append(runs)
                 .append(" runs per configuration; keys chosen uniformly at random; every key written once before the"
                 + " first run. Latency is per operation, from the call to its answer, as the client sees it.\n");
         md.append("- **Reads** are linearizable (ReadIndex on the leader); **writes** are Puts committed on a majority"
                 + " and applied before the answer.\n");
+        md.append("- **CPU** (whole machine, from /proc/stat during each window, like vmstat): r = threads running or"
+                + " waiting for a CPU (median of 1 s samples, including the sampler itself); us / sy / id / wa / st ="
+                + " user, system, idle, I/O wait and **steal** (CPU time the hypervisor gave to other guests) as a"
+                + " share of all CPU time. The raw `vmstat 1` log is kept next to this report.\n");
         md.append("- **Coordinated omission:** closed-loop load slows down when the system does, so a stall delays the"
                 + " operations that would have been sent during it instead of recording them as slow. Percentiles"
                 + " here can therefore hide latency spikes; they describe what these clients saw, not an open-loop"
@@ -37,8 +43,9 @@ final class Reports {
                 .collect(Collectors.groupingBy(LoadBenchmark.RunResult::workload, LinkedHashMap::new,
                         Collectors.toList()));
         md.append("## Summary: median of ").append(runs).append(" runs (min–max in parentheses)\n\n");
-        md.append("| Clients | Reads / writes | Value | ops/s | p50 ms | p99 ms | p99.9 ms | Failed ops | Runs with a term or leader change |\n");
-        md.append("|---|---|---|---|---|---|---|---|---|\n");
+        md.append("| Clients | Reads / writes | Value | ops/s | p50 ms | read p50 ms | write p50 ms | p99 ms | p99.9 ms"
+                + " | Failed ops | Runs with a term or leader change | r | idle % | steal % |\n");
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
         for (var entry : byWorkload.entrySet()) {
             LoadBenchmark.Workload w = entry.getKey();
             List<LoadBenchmark.RunResult> rs = entry.getValue();
@@ -46,34 +53,46 @@ final class Reports {
                     .append(100 - w.readPercent()).append("% | ").append(w.valueBytes()).append(" B | ")
                     .append(Stats.medianAndSpread(column(rs, r -> r.opsPerSecond()), "%.0f")).append(" | ")
                     .append(Stats.medianAndSpread(column(rs, r -> Main.ms(r.all(), 50)), "%.2f")).append(" | ")
+                    .append(Stats.medianAndSpread(column(rs, r -> Main.ms(r.readLatency(), 50)), "%.2f")).append(" | ")
+                    .append(Stats.medianAndSpread(column(rs, r -> Main.ms(r.writeLatency(), 50)), "%.2f")).append(" | ")
                     .append(Stats.medianAndSpread(column(rs, r -> Main.ms(r.all(), 99)), "%.2f")).append(" | ")
                     .append(Stats.medianAndSpread(column(rs, r -> Main.ms(r.all(), 99.9)), "%.2f")).append(" | ")
                     .append(rs.stream().mapToLong(LoadBenchmark.RunResult::failures).sum()).append(" | ")
                     .append(rs.stream().filter(LoadBenchmark.RunResult::electionDuringRun).count()).append(" of ")
-                    .append(rs.size()).append(" |\n");
+                    .append(rs.size()).append(" | ")
+                    .append(Stats.medianAndSpread(column(rs, r -> r.cpu().runnableMedian()), "%.0f")).append(" | ")
+                    .append(Stats.medianAndSpread(column(rs, r -> r.cpu().idle()), "%.0f")).append(" | ")
+                    .append(Stats.medianAndSpread(column(rs, r -> r.cpu().steal()), "%.0f")).append(" |\n");
         }
 
         md.append("\n## Every run\n\n");
-        md.append("| Clients | Reads / writes | Value | Run | Operations | ops/s | p50 ms | p99 ms | p99.9 ms | max ms"
-                + " | read p99 ms | write p99 ms | Failed | Term, leader at start | at end |\n");
-        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
-        StringBuilder csv = new StringBuilder("label,clients,read_percent,value_bytes,run,operations,reads,writes,"
-                + "ops_per_s,p50_ms,p99_ms,p999_ms,max_ms,read_p99_ms,write_p99_ms,failures,term_start,leader_start,"
-                + "term_end,leader_end\n");
+        md.append("| Clients | Reads / writes | Value | Run | Warm-up s | Operations | ops/s | p50 ms | read p50 ms"
+                + " | write p50 ms | p99 ms | p99.9 ms | max ms | read p99 ms | write p99 ms | Failed"
+                + " | Term, leader at start | at end | CPU (r, us, sy, id, wa, st) |\n");
+        md.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
+        StringBuilder csv = new StringBuilder("label,clients,read_percent,value_bytes,run,warmup_s,operations,reads,"
+                + "writes,ops_per_s,p50_ms,read_p50_ms,write_p50_ms,p99_ms,p999_ms,max_ms,read_p99_ms,write_p99_ms,"
+                + "failures,term_start,leader_start,term_end,leader_end,runnable_median,runnable_max,cpu_user,"
+                + "cpu_system,cpu_idle,cpu_iowait,cpu_steal\n");
         for (LoadBenchmark.RunResult r : results) {
             LoadBenchmark.Workload w = r.workload();
-            md.append(String.format("| %d | %d%% / %d%% | %d B | %d | %d | %.0f | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f"
-                            + " | %d | %s | %s%s |%n", w.clients(), w.readPercent(), 100 - w.readPercent(),
-                    w.valueBytes(), r.run(), r.operations(), r.opsPerSecond(), Main.ms(r.all(), 50),
+            CpuSampler.CpuStats c = r.cpu();
+            md.append(String.format("| %d | %d%% / %d%% | %d B | %d | %d | %d | %.0f | %.2f | %.2f | %.2f | %.2f | %.2f"
+                            + " | %.2f | %.2f | %.2f | %d | %s | %s%s | %s |%n", w.clients(), w.readPercent(),
+                    100 - w.readPercent(), w.valueBytes(), r.run(), r.warmup().toSeconds(), r.operations(),
+                    r.opsPerSecond(), Main.ms(r.all(), 50), Main.ms(r.readLatency(), 50), Main.ms(r.writeLatency(), 50),
                     Main.ms(r.all(), 99), Main.ms(r.all(), 99.9), r.all().getMaxValue() / 1000.0,
                     Main.ms(r.readLatency(), 99), Main.ms(r.writeLatency(), 99), r.failures(), r.termAtStart(),
-                    r.termAtEnd(), r.electionDuringRun() ? " **(changed)**" : ""));
-            csv.append(String.format("%s,%d,%d,%d,%d,%d,%d,%d,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,%d,%d%n",
-                    label, w.clients(), w.readPercent(), w.valueBytes(), r.run(), r.operations(), r.reads(), r.writes(),
-                    r.opsPerSecond(), Main.ms(r.all(), 50), Main.ms(r.all(), 99), Main.ms(r.all(), 99.9),
-                    r.all().getMaxValue() / 1000.0, Main.ms(r.readLatency(), 99), Main.ms(r.writeLatency(), 99),
-                    r.failures(), r.termAtStart().term(), r.termAtStart().leader(), r.termAtEnd().term(),
-                    r.termAtEnd().leader()));
+                    r.termAtEnd(), r.electionDuringRun() ? " **(changed)**" : "", c.describe()));
+            csv.append(String.format("%s,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%d,%d,%d,"
+                            + "%d,%d,%.1f,%d,%.1f,%.1f,%.1f,%.1f,%.1f%n",
+                    label, w.clients(), w.readPercent(), w.valueBytes(), r.run(), r.warmup().toSeconds(),
+                    r.operations(), r.reads(), r.writes(), r.opsPerSecond(), Main.ms(r.all(), 50),
+                    Main.ms(r.readLatency(), 50), Main.ms(r.writeLatency(), 50), Main.ms(r.all(), 99),
+                    Main.ms(r.all(), 99.9), r.all().getMaxValue() / 1000.0, Main.ms(r.readLatency(), 99),
+                    Main.ms(r.writeLatency(), 99), r.failures(), r.termAtStart().term(), r.termAtStart().leader(),
+                    r.termAtEnd().term(), r.termAtEnd().leader(), c.runnableMedian(), c.runnableMax(), c.user(),
+                    c.system(), c.idle(), c.iowait(), c.steal()));
         }
         md.append("\nThe term and leader come from every node's /status just before the window opens and just after"
                 + " it closes. A change means an election happened under load.\n");
@@ -82,9 +101,12 @@ final class Reports {
         Files.writeString(Path.of(report.toString().replaceFirst("\\.md$", ".csv")), csv);
     }
 
-    static void writeFailover(Path report, String label, String command, String setup,
+    static void writeFailover(Path report, String label, String command, String setup, Duration warmup,
             List<FailoverBenchmark.Trial> trials, Map<Integer, ClusterProbe.NodeStatus> nodes) throws IOException {
         StringBuilder md = header("Leader failover: " + label, command, setup);
+        md.append("- **Warm-up:** ").append(warmup.toSeconds()).append(" s of load (16 clients, 50% reads, 100 B;"
+                + " not recorded) before the first trial, so the nodes' JIT is warm. A killed leader restarts as a"
+                + " fresh JVM, so every later trial has one cold node (a follower by then).\n");
         md.append("- **Method:** ").append(trials.size()).append(" trials. Each waits until all 5 nodes agree on one"
                 + " leader and have caught up, then `docker kill`s the leader (SIGKILL). A watcher asks the old"
                 + " leader's /status over and over; **the clock starts at its last successful answer** (the last moment"

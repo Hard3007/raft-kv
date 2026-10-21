@@ -17,12 +17,14 @@ import org.HdrHistogram.Histogram;
  * for the answer, and immediately sends the next (no think time). One run:
  * <ol>
  *   <li>wait until the cluster is stable (one leader, everyone caught up);
- *   <li>start the clients and let them run for the warm-up period (JIT, connections, caches),
- *       recording nothing;
+ *   <li>start the clients and let them run for the warm-up period, recording nothing. The first
+ *       run on a fresh cluster warms up longer (default 60 s): the nodes' JIT compilers compete
+ *       with the load for the CPU until the hot code is compiled. Later runs reuse warm nodes;
  *   <li>record the term, then measure for the measurement window: only operations that start
  *       and finish inside the window count;
  *   <li>record the term again. A different term means an election happened under load.
  * </ol>
+ * During the window a {@link CpuSampler} records what vmstat would show for the whole machine.
  * Latency is measured per operation from just before the call to its answer, in microseconds,
  * into HdrHistograms (one per thread, merged at the end).
  */
@@ -38,8 +40,8 @@ final class LoadBenchmark {
 
     /** The outcome of one measured run. */
     record RunResult(Workload workload, int run, long operations, long reads, long writes, long failures,
-            double seconds, Histogram all, Histogram readLatency, Histogram writeLatency,
-            ClusterProbe.TermSnapshot termAtStart, ClusterProbe.TermSnapshot termAtEnd) {
+            double seconds, Duration warmup, Histogram all, Histogram readLatency, Histogram writeLatency,
+            ClusterProbe.TermSnapshot termAtStart, ClusterProbe.TermSnapshot termAtEnd, CpuSampler.CpuStats cpu) {
 
         double opsPerSecond() {
             return operations / seconds;
@@ -53,13 +55,38 @@ final class LoadBenchmark {
     private static final long HIGHEST_TRACKABLE_MICROS = TimeUnit.SECONDS.toMicros(60);
 
     private final ClusterProbe cluster;
-    private final Duration warmup;
     private final Duration measure;
 
-    LoadBenchmark(ClusterProbe cluster, Duration warmup, Duration measure) {
+    LoadBenchmark(ClusterProbe cluster, Duration measure) {
         this.cluster = cluster;
-        this.warmup = warmup;
         this.measure = measure;
+    }
+
+    /** Runs the workload for {@code duration} and records nothing (warms up the nodes' JIT). */
+    void warmUp(Workload workload, Duration duration) throws InterruptedException {
+        cluster.awaitStable(Duration.ofSeconds(60));
+        List<ClientLoop> loops = startLoops(workload);
+        Thread.sleep(duration.toMillis());
+        stopLoops(loops);
+    }
+
+    private List<ClientLoop> startLoops(Workload workload) {
+        List<ClientLoop> loops = new ArrayList<>();
+        for (int c = 0; c < workload.clients(); c++) {
+            ClientLoop loop = new ClientLoop(newClient(), workload);
+            loops.add(loop);
+            loop.thread = new Thread(loop, "bench-client-" + c);
+            loop.thread.start();
+        }
+        return loops;
+    }
+
+    private static void stopLoops(List<ClientLoop> loops) throws InterruptedException {
+        loops.forEach(ClientLoop::stop);
+        for (ClientLoop loop : loops) {
+            loop.thread.join();
+            loop.client.close();
+        }
     }
 
     /** Writes every key once, so reads find values of the configured size. */
@@ -95,20 +122,14 @@ final class LoadBenchmark {
         }
     }
 
-    RunResult run(Workload workload, int runNumber) throws InterruptedException {
+    RunResult run(Workload workload, int runNumber, Duration warmup) throws InterruptedException {
         cluster.awaitStable(Duration.ofSeconds(60));
-        List<ClientLoop> loops = new ArrayList<>();
-        List<Thread> threads = new ArrayList<>();
-        for (int c = 0; c < workload.clients(); c++) {
-            ClientLoop loop = new ClientLoop(newClient(), workload);
-            loops.add(loop);
-            Thread thread = new Thread(loop, "bench-client-" + c);
-            threads.add(thread);
-            thread.start();
-        }
+        List<ClientLoop> loops = startLoops(workload);
 
         Thread.sleep(warmup.toMillis()); // warm-up: operations run but are not recorded
         ClusterProbe.TermSnapshot termAtStart = cluster.termSnapshot();
+        CpuSampler cpu = new CpuSampler();
+        cpu.start();
         long windowStart = System.nanoTime();
         long windowEnd = windowStart + measure.toNanos();
         loops.forEach(loop -> loop.measureBetween(windowStart, windowEnd));
@@ -116,12 +137,10 @@ final class LoadBenchmark {
         while (System.nanoTime() < windowEnd) {
             Thread.onSpinWait();
         }
+        CpuSampler.CpuStats cpuStats = cpu.stop();
         ClusterProbe.TermSnapshot termAtEnd = cluster.termSnapshot();
 
-        loops.forEach(ClientLoop::stop);
-        for (Thread thread : threads) {
-            thread.join();
-        }
+        stopLoops(loops);
         Histogram all = newHistogram();
         Histogram reads = newHistogram();
         Histogram writes = newHistogram();
@@ -130,12 +149,11 @@ final class LoadBenchmark {
             reads.add(loop.readLatency);
             writes.add(loop.writeLatency);
             failures += loop.failures;
-            loop.client.close();
         }
         all.add(reads);
         all.add(writes);
         return new RunResult(workload, runNumber, all.getTotalCount(), reads.getTotalCount(), writes.getTotalCount(),
-                failures, measure.toNanos() / 1e9, all, reads, writes, termAtStart, termAtEnd);
+                failures, measure.toNanos() / 1e9, warmup, all, reads, writes, termAtStart, termAtEnd, cpuStats);
     }
 
     private BlockingKvClient newClient() {
@@ -165,6 +183,7 @@ final class LoadBenchmark {
         final Random random = new Random();
         final Histogram readLatency = newHistogram();
         final Histogram writeLatency = newHistogram();
+        Thread thread;
         long failures; // operations in the window that did not end OK (only read after join)
         private volatile boolean running = true;
         private volatile long windowStart = Long.MAX_VALUE;

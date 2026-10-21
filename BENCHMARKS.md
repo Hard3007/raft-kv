@@ -14,6 +14,18 @@ Numbers from the GitHub Codespace are sanity checks (section 5).
   **there is no real network latency in any of these numbers**. On a real network every
   replication round trip would add the network's RTT.
 - **The load generator competes with the nodes for CPU** (2 cores on both machines).
+- **The setup is CPU-bound, not disk-bound.** On the Oracle VM, `vmstat` and `iostat` during the
+  first smoke run showed:
+  - the run queue far longer than the 2 cores, with idle time near zero and measurable **steal
+    time** (the hypervisor running other guests on our cores);
+  - the disk far from saturated.
+
+  That first observation was by hand. From then on every load report measures it per run
+  (columns `r`, `idle %` and `steal %`, plus the full `vmstat 1` log next to the report), and
+  the numbers quoted in §4 come from those reports.
+- **What "slow fsync" means here.** Nodes log any fsync that takes 50 ms or more of *wall-clock*
+  time. On a CPU-starved machine most of that can be the thread waiting for a CPU after the disk
+  has finished, not the disk itself. Read those logs together with the CPU columns.
 - **fsync is ON**, as Raft requires:
   - every node fsyncs its Raft log (term, vote, entries) before it answers any RPC;
   - the leader fsyncs before it counts its own copy (with group commit: one fsync per burst of
@@ -34,12 +46,22 @@ Numbers from the GitHub Codespace are sanity checks (section 5).
   - Reads are linearizable Gets (ReadIndex on the leader: one heartbeat round to a majority).
   - Writes are Puts, committed on a majority and applied before the answer.
   - **Every result states its read/write ratio.** The fixed configuration is 50% / 50%.
-- **Warm-up.** Each run starts its clients, runs 10 s without recording, then measures for
-  30 s. Only operations that start and finish inside the window count.
+- **Warm-up.** Each run starts its clients and runs without recording before it measures:
+  - **60 s before the first run** on every fresh cluster. Until the JIT has compiled the hot
+    code, compilation competes with the load for the 2 cores. On the Oracle VM a 5 s warm-up gave
+    less than half the throughput of a 60 s one.
+  - **10 s before each later run** on the same, already warm, nodes.
+
+  Then it measures for 30 s. Only operations that start and finish inside the window count.
+  Failover runs 60 s of load before its first trial.
 - **Repetition.** At least 3 runs per configuration. Tables show the **median of the runs, with
   the min–max spread** in parentheses.
 - **Latency.** Per operation, from the call to its answer, as the client sees it (retries
-  included), in an HdrHistogram per thread, merged.
+  included), in an HdrHistogram per thread, merged. Reads and writes are also reported
+  separately (p50 and p99 each).
+- **CPU.** For every window: r (threads running or waiting for a CPU, median of 1 s samples),
+  and user / system / idle / iowait / steal as a share of all CPU time, from `/proc/stat` (what
+  vmstat reads).
 - **Sweep.** 1, 4, 16 and 64 clients at 100 B values show the throughput vs. latency curve,
   plus 16 clients at 1 KB values.
 - **The resume number uses one fixed configuration: 16 clients, 50% reads / 50% writes, 100 B
@@ -114,7 +136,7 @@ Reports: `reports/bench/load-sanity-{1-baseline,2-batching,3-pipelining,4-group-
 - **What this machine can show:** batching removes the duplicate sends of the baseline.
   Throughput went up by about two thirds and p99 roughly halved.
 - **What it cannot show:** whether pipelining and group commit help. Every node thread still had
-  single tasks of 0.5–1.4 s, almost all of them slow fsyncs on the shared loop device, and two
+  single tasks of 0.5–1.4 s, logged as slow fsyncs, mostly time spent waiting for a CPU (see below), and two
   of the four runs had elections inside the measurement window. DESIGN.md §7.4 has the
   investigation.
 
@@ -123,7 +145,22 @@ Reports: `reports/bench/load-sanity-{1-baseline,2-batching,3-pipelining,4-group-
 visible in `/status` after a median of 314 ms; the rest is the client finding it. Measured from
 the start of `docker kill` instead: median 694 ms (the command itself took a median of 330 ms).
 
-Earlier baseline runs on f790266 before any Phase 7 change (`load-baseline-sanity-*`,
+**CPU and JVM threads** (one sanity run each; 16 clients, 50% / 50%, 100 B, 60 s warm-up, 30 s
+measured; a scratch script, so treat these as direction only). The machine is CPU-bound: during
+every window r was 10-13 (peaks 23-32) on 2 cores, idle 0-2%, iowait 0-3%, steal 0%. Fewer JVM
+threads per node made each operation cheaper. Every run had an election in its window.
+
+| Node JVM flags (`NODE_JVM_FLAGS`) | ops/s | read p50 ms | write p50 ms | p99 ms | node CPU per op |
+|---|---|---|---|---|---|
+| none (default) | 279 | 38.8 | 48.1 | 284 | 3.8 ms |
+| `-XX:ActiveProcessorCount=1 -Dio.grpc.netty.shaded.io.netty.eventLoopThreads=1` | 411 | 27.0 | 33.7 | 194 | 2.2 ms |
+| the same plus `-XX:TieredStopAtLevel=1` (C1 JIT only) | 438 | 26.4 | 31.6 | 175 | 1.7 ms |
+| the first line's flags on the load generator too (`BENCH_JVM_FLAGS`) | 399 | 27.4 | 33.3 | 274 | 2.5 ms |
+
+The defaults stay unchanged until the Oracle VM has measured these with 3 runs each.
+
+Earlier baseline runs on f790266 before any Phase 7 change
+ (`load-baseline-sanity-*`,
 `failover-baseline-sanity-*`):
 - about 160 ops/s at both 16 and 64 clients (fsync-bound);
 - one 1 KB run with an election, which started the investigation;
@@ -136,10 +173,11 @@ The image and the bench binary they used were built from f790266.
 
 ```bash
 scripts/docker-build.sh --local     # the image for this machine
-scripts/bench.sh compare            # each optimization, before vs after (about 12 min)
-scripts/bench.sh sweep              # 1/4/16/64 clients at 100 B, 16 clients at 1 KB (about 12 min)
-scripts/failover.sh 50              # 50 leader kills (about 8 min)
+scripts/bench.sh compare            # each optimization, before vs after (about 15 min)
+scripts/bench.sh sweep              # 1/4/16/64 clients at 100 B, 16 clients at 1 KB (about 14 min)
+scripts/failover.sh 50              # 50 leader kills (about 9 min)
 ```
-`RUNS`, `WARMUP_S`, `MEASURE_S` and `READ_PERCENT` override the method for quick checks, and
-every report records them. `ELECTION_TIMEOUT_MS` (default `150-300`) is passed to the nodes and
-recorded too.
+`RUNS`, `CLUSTER_WARMUP_S`, `WARMUP_S`, `MEASURE_S` and `READ_PERCENT` override the method for
+quick checks, and every report records them. Also passed to the nodes and recorded:
+`ELECTION_TIMEOUT_MS` (default `150-300`) and `NODE_JVM_FLAGS` (extra JVM flags, default none).
+`BENCH_JVM_FLAGS` go to the load generator.

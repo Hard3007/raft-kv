@@ -966,7 +966,7 @@ networks, do not guarantee it.
 - **Deletes don't reclaim B-Tree space** (§1.3).
 - **fsync and GC run on the node thread, between heartbeats.** A leader stuck in a slow fsync
   (or a GC pause) sends no heartbeats. If that lasts longer than the minimum election timeout,
-  the followers elect a new leader; this happened under load on the Codespace's shared disk
+  the followers elect a new leader; this happened under load on both machines, where the node thread mostly waited for a CPU
   (§7.4). **Future improvement (Raft thesis §10.2.1):**
   - The leader writes its own log on a separate I/O thread, in parallel with replication, and
     keeps sending heartbeats meanwhile.
@@ -1041,17 +1041,29 @@ optimizations.
 - **What it showed (Codespace).** The leader's node thread ran single tasks of 0.5-1.3 s. During
   one of them its followers waited 161-168 ms without a heartbeat, timed out, and elected a new
   leader. PreVote did not prevent it: the majority really had not heard from the leader.
-- **Two causes.**
-  1. **fsync stalls.** In 30 s of load there were 155 fsyncs of 50 ms or more (median 71 ms,
-     max 479 ms). The same disk answers in 0.8 ms (p50) when idle (FsyncProbe). Five nodes'
-     fsyncs and page writes queue on one virtual disk (a loop device in Docker-in-Docker).
-     Batching and group commit reduce the NUMBER of fsyncs but cannot make one faster.
+- **Causes, as first understood.**
+  1. **"Slow fsyncs."** In 30 s of load there were 155 fsyncs of 50 ms or more (median 71 ms,
+     max 479 ms) by wall-clock time, while the same disk answers in 0.8 ms (p50) when idle
+     (FsyncProbe). I first blamed five nodes queueing on one virtual disk.
   2. **GC pauses**, all avoidable by configuration. Serial GC full collections, 50-190 ms each:
      the code cache reaching its threshold (32 MB cap), metaspace reaching its first threshold,
-     and the heap growing from its 6 MB default. Fixed in the Dockerfile (§5.4). What remains is
-     CPU starvation: 2 cores for 5 nodes and the load generator.
-- **In Raft terms:** the paper's timing requirement is broadcastTime << electionTimeout. Here an
-  fsync inside the "broadcast" sometimes takes longer than the whole 150-300 ms timeout.
+     and the heap growing from its 6 MB default. Fixed in the Dockerfile (§5.4).
+- **Correction: the machine is CPU-bound, not disk-bound.** On the Oracle VM, vmstat and iostat
+  during load showed the run queue at many times the 2 cores, idle near 0%, iowait near 0%,
+  steal time, and a disk far from saturated. The CPU sampler added to every load report then
+  showed the same on the Codespace: r 10-13 (peaks 23-32) on 2 cores, idle 0-2%, iowait 0-3%,
+  system time 34-46%. So most of a "slow fsync" is the node thread **waiting for a CPU** before
+  and after the disk does its part: the log measures wall-clock time. One task delays every task
+  queued behind it, heartbeats included, either way.
+- **Where the CPU goes** (Codespace, one 20 s sample under load): the load generator used more
+  than any single node (about 0.37 cores, against 0.06-0.22 per node), and inside each node the
+  gRPC/Netty threads used 2-3 times the CPU of the Raft node thread. With fewer JVM threads per
+  node (`-XX:ActiveProcessorCount=1`, one Netty event loop), node CPU per operation fell from
+  about 3.8 to 2.2 ms in one sanity run each (BENCHMARKS.md §5). That is config only, through
+  `NODE_JVM_FLAGS`; the defaults stay unchanged until the Oracle VM has measured it.
+- **In Raft terms:** the paper's timing requirement is broadcastTime << electionTimeout. Here the
+  "broadcast" includes waiting for a CPU, which sometimes takes longer than the whole 150-300 ms
+  timeout.
 - **Decision (with the user):** keep the design and the paper's timeout, report elections in
   every benchmark, and include an fsync probe in every report. If the Oracle VM also shows
   elections under load, its benchmarks run with a larger `ELECTION_TIMEOUT_MS` (configurable

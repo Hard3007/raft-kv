@@ -21,6 +21,8 @@ x-cluster: &cluster
   GROUP_COMMIT: "${GROUP_COMMIT:-true}"
   # Randomized election timeout, min-max ms (Raft paper: 150-300). Benchmark reports state it.
   ELECTION_TIMEOUT_MS: "${ELECTION_TIMEOUT_MS:-150-300}"
+  # Extra JVM flags (benchmarks only; default none). The JVM reads JAVA_TOOL_OPTIONS itself.
+  JAVA_TOOL_OPTIONS: "${NODE_JVM_FLAGS:-}"
 
 services:
   node1:

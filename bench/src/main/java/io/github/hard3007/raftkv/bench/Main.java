@@ -18,8 +18,8 @@ import java.util.Map;
  * scripts/bench.sh and scripts/failover.sh do everything, including the machine description).
  * <pre>
  *   load     --label L --clients 1,4,16,64 --read-percent 50 --value-bytes 100 --keys 1000
- *            --warmup-s 10 --measure-s 30 --runs 3 [--setup-file F] [--command C]
- *   failover --label L --trials 50 [--setup-file F] [--command C]
+ *            --cluster-warmup-s 60 --warmup-s 10 --measure-s 30 --runs 3 [--setup-file F] [--command C]
+ *   failover --label L --trials 50 --warmup-s 60 [--setup-file F] [--command C]
  * </pre>
  * Every report goes to reports/bench/, named with the commit and a UTC timestamp, and is never
  * overwritten. Each load report also has a CSV twin with one row per run.
@@ -57,33 +57,44 @@ public final class Main {
         int valueBytes = Integer.parseInt(options.getOrDefault("value-bytes", "100"));
         int keys = Integer.parseInt(options.getOrDefault("keys", "1000"));
         int runs = Integer.parseInt(options.getOrDefault("runs", "3"));
+        // The first run on the (fresh) cluster warms up longer: until the JIT has compiled the hot
+        // code, compilation competes with the load for the CPU. Later runs reuse the warm nodes.
+        Duration clusterWarmup = Duration.ofSeconds(Long.parseLong(options.getOrDefault("cluster-warmup-s", "60")));
         Duration warmup = Duration.ofSeconds(Long.parseLong(options.getOrDefault("warmup-s", "10")));
         Duration measure = Duration.ofSeconds(Long.parseLong(options.getOrDefault("measure-s", "30")));
         Path report = newReport("load-" + label, ".md");
 
-        LoadBenchmark bench = new LoadBenchmark(cluster, warmup, measure);
+        LoadBenchmark bench = new LoadBenchmark(cluster, measure);
         List<LoadBenchmark.RunResult> results = new ArrayList<>();
         cluster.awaitStable(Duration.ofSeconds(60));
         bench.preload(new LoadBenchmark.Workload(1, readPercent, valueBytes, keys));
         for (int clients : clientCounts) {
             LoadBenchmark.Workload workload = new LoadBenchmark.Workload(clients, readPercent, valueBytes, keys);
             for (int run = 1; run <= runs; run++) {
-                LoadBenchmark.RunResult r = bench.run(workload, run);
+                LoadBenchmark.RunResult r = bench.run(workload, run, results.isEmpty() ? clusterWarmup : warmup);
                 results.add(r);
-                System.out.printf("%s | run %d: %.0f ops/s, p50 %.2f ms, p99 %.2f ms, p999 %.2f ms, failures %d, %s -> %s%s%n",
-                        workload.describe(), run, r.opsPerSecond(), ms(r.all(), 50), ms(r.all(), 99), ms(r.all(), 99.9),
-                        r.failures(), r.termAtStart(), r.termAtEnd(),
+                System.out.printf("%s | run %d: %.0f ops/s, p50 %.2f ms (read %.2f, write %.2f), p99 %.2f ms, p999 %.2f ms,"
+                                + " failures %d, %s -> %s, %s%s%n",
+                        workload.describe(), run, r.opsPerSecond(), ms(r.all(), 50), ms(r.readLatency(), 50),
+                        ms(r.writeLatency(), 50), ms(r.all(), 99), ms(r.all(), 99.9), r.failures(), r.termAtStart(),
+                        r.termAtEnd(), r.cpu().describe(),
                         r.electionDuringRun() ? "  ** LEADER OR TERM CHANGED DURING THE RUN **" : "");
             }
         }
-        Reports.writeLoad(report, label, command, setup, warmup, measure, runs, results, cluster.statusOfAll());
+        Reports.writeLoad(report, label, command, setup, clusterWarmup, warmup, measure, runs, results,
+                cluster.statusOfAll());
         System.out.println("report: " + report);
     }
 
     private static void failover(ClusterProbe cluster, Map<String, String> options, String label, String setup,
             String command) throws Exception {
         int trials = Integer.parseInt(options.getOrDefault("trials", "50"));
+        Duration warmup = Duration.ofSeconds(Long.parseLong(options.getOrDefault("warmup-s", "60")));
         Path report = newReport("failover-" + label, ".md");
+        // Warm the nodes' JIT first (16 clients, 50% reads, 100 B values; nothing recorded). Each
+        // killed leader comes back as a fresh JVM, so later trials always include one cold node.
+        System.out.printf("warm-up: %d s of load before the first trial%n", warmup.toSeconds());
+        new LoadBenchmark(cluster, Duration.ofSeconds(1)).warmUp(new LoadBenchmark.Workload(16, 50, 100, 1000), warmup);
         FailoverBenchmark bench = new FailoverBenchmark(cluster);
         List<FailoverBenchmark.Trial> results = new ArrayList<>();
         for (int t = 1; t <= trials; t++) {
@@ -95,7 +106,7 @@ public final class Main {
                     trial.firstWriteMs() - trial.lastAliveMs(), trial.lastAliveMs(), trial.firstWriteMs());
         }
         cluster.awaitStable(Duration.ofSeconds(60));
-        Reports.writeFailover(report, label, command, setup, results, cluster.statusOfAll());
+        Reports.writeFailover(report, label, command, setup, warmup, results, cluster.statusOfAll());
         System.out.println("report: " + report);
     }
 

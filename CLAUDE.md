@@ -104,7 +104,7 @@ Build config: `buildSrc/src/main/kotlin/raftkv.java-conventions.gradle.kts` (sha
   - With group commit a follower never gets an entry the leader has not persisted, and the leader counts itself only
     for durable entries (§7.3).
   - Final resume numbers come only from the Oracle VM; Codespaces runs are labeled sanity checks.
-  - Elections under load (DESIGN.md §7.4): on the Codespace, fsync stalls (up to ~0.5 s on the shared loop disk) block
+  - Elections under load (DESIGN.md §7.4): on both machines, CPU starvation (r 10-30 on 2 cores, iowait ~0) and the fsync and GC on the node thread block
     the leader's node thread past the 150 ms timeout. Decision: keep 150-300 ms as the default and in ALL tests and
     chaos. Only if the Oracle VM also shows elections, run its benchmarks with a larger `ELECTION_TIMEOUT_MS` and say
     so in every report. Async leader fsync (thesis §10.2.1) is future work only (DESIGN.md §6).
