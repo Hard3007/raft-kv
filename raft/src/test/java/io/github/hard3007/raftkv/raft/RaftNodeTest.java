@@ -25,8 +25,14 @@ import org.junit.jupiter.api.Test;
  */
 class RaftNodeTest {
 
-    /** These tests drive Figure 2 rules one at a time; PreVote has its own tests (RaftPreVoteTest). */
-    static final RaftConfig FIGURE_2_ONLY = RaftConfig.defaults().withPreVote(false);
+    /**
+     * These tests drive Figure 2 rules one at a time; PreVote has its own tests (RaftPreVoteTest).
+     * Figure 2 and nothing more: no PreVote, every proposal sent at once to every follower
+     * (no flow control), and every entry fsynced on its own. Tests that drive single messages by
+     * hand use it; RaftReplicationFlowTest covers batching, pipelining and group commit.
+     */
+    static final RaftConfig FIGURE_2_ONLY = RaftConfig.defaults().withPreVote(false).withMaxAppendsInFlight(0)
+            .withGroupCommit(false);
 
     private final Simulation sim = new Simulation(1);
     private final SimulatedFileSystem disk = new SimulatedFileSystem(new Random(1));

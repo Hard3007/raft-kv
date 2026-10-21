@@ -110,6 +110,19 @@ public final class RaftNode implements RaftRpcHandler {
     private final Map<Integer, Long> acknowledgedRound = new HashMap<>();
     private boolean heartbeatRoundScheduled;
 
+    // Batching and pipelining (leader only; see sendAppendEntries). Bookkeeping for sending only:
+    // nextIndex and matchIndex still change only on replies, as in Figure 2.
+    /** Per peer: AppendEntries carrying entries that were sent and not yet answered. */
+    private final Map<Integer, Integer> appendsInFlight = new HashMap<>();
+    /** Per peer: the last index sent in such a request (the next request continues after it). */
+    private final Map<Integer, Long> sentIndex = new HashMap<>();
+    /** Per peer: when the window last moved (a send into an empty window, or an answer). */
+    private final Map<Integer, Long> windowMovedMillis = new HashMap<>();
+
+    // Group commit (leader only): entries appended to the log but not yet on disk.
+    private final List<LogEntry> unsyncedEntries = new ArrayList<>();
+    private boolean flushScheduled;
+
     /**
      * @param peers        ids of the other servers in the cluster (not including {@code id})
      * @param storage      opened storage; the node resumes from its recovered term, vote and log
@@ -202,8 +215,8 @@ public final class RaftNode implements RaftRpcHandler {
             return Optional.empty();
         }
         LogEntry entry = appendToOwnLog(EntryType.COMMAND, ByteString.copyFrom(command));
-        sendAppendEntriesToAll();
-        if (peers.isEmpty()) {
+        replicateToAll();
+        if (peers.isEmpty() && !config.groupCommit()) {
             // A single-node cluster is its own majority. Commit (and apply) on the next task, never
             // inside propose(): the caller must be able to record the proposal before its entry
             // is applied, or it would miss its own reply.
@@ -529,6 +542,9 @@ public final class RaftNode implements RaftRpcHandler {
     private void onElectionTimeout() {
         scheduler.checkThread(); // thread confinement: every entry point runs on the node's thread
         if (role != Role.LEADER) {
+            logger.info("node={} event=election_timeout term={} role={} leader={} ms_since_leader_contact={}", id,
+                    currentTerm, role, leaderId, lastLeaderContactMillis == Long.MIN_VALUE ? -1
+                            : scheduler.nowMillis() - lastLeaderContactMillis);
             if (config.preVote()) {
                 startPreVote();
             } else {
@@ -665,6 +681,7 @@ public final class RaftNode implements RaftRpcHandler {
             matchIndex.put(peer, 0L);
             acknowledgedRound.put(peer, 0L);
             lastHeardFromMillis.put(peer, scheduler.nowMillis());
+            restartWindow(peer);
         }
         leaderSinceMillis = scheduler.nowMillis();
         logger.info("node={} event=became_leader term={} last_log_index={} last_log_term={} commit={} votes={}", id, currentTerm,
@@ -680,7 +697,7 @@ public final class RaftNode implements RaftRpcHandler {
         // already carries the no-op.
         sendAppendEntriesToAll();
         scheduleHeartbeat();
-        advanceCommitIndex(); // a single-node cluster commits immediately
+        advanceCommitIndex(); // a single-node cluster commits immediately (with group commit: after the flush)
     }
 
     private void scheduleHeartbeat() {
@@ -707,6 +724,9 @@ public final class RaftNode implements RaftRpcHandler {
      */
     private void stepDown(long term) {
         boolean wasLeader = role == Role.LEADER;
+        // Group commit: write our pending entries before anything else touches the log (a new
+        // leader's AppendEntries may truncate it next). They are uncommitted; that is allowed.
+        flushOwnEntries();
         if (term > currentTerm) {
             currentTerm = term;
             votedFor = NOBODY;
@@ -760,40 +780,140 @@ public final class RaftNode implements RaftRpcHandler {
                 .setCommand(command)
                 .build();
         log.append(entry);
-        // The leader counts itself toward a majority (Leader-4), so its own copy must be durable first.
-        storage.save(currentTerm, votedFor, 0, List.of(entry));
+        // The leader counts itself toward a majority (Leader-4), so its own copy must be durable
+        // before it counts (and, our rule, before any follower gets it; see lastDurableIndex).
+        if (config.groupCommit()) {
+            unsyncedEntries.add(entry);
+            scheduleFlush();
+        } else {
+            storage.save(currentTerm, votedFor, 0, List.of(entry));
+        }
         return entry;
     }
 
+    /**
+     * Group commit: one task writes every entry appended since the last flush, with one fsync.
+     * Proposals that arrive while the node is busy (for example during the previous fsync) are
+     * queued on the node's thread ahead of this task, so they all share its fsync.
+     */
+    private void scheduleFlush() {
+        if (flushScheduled) {
+            return;
+        }
+        flushScheduled = true;
+        scheduler.schedule(0, () -> {
+            scheduler.checkThread();
+            flushScheduled = false;
+            if (flushOwnEntries() && role == Role.LEADER) {
+                advanceCommitIndex(); // a single-node cluster commits here
+                replicateToAll();     // the new entries are durable now, so followers may have them
+            }
+        });
+    }
+
+    /** Writes the unsynced entries in one WAL record (one fsync). Returns false if there were none. */
+    private boolean flushOwnEntries() {
+        if (unsyncedEntries.isEmpty()) {
+            return false;
+        }
+        storage.save(currentTerm, votedFor, 0, List.copyOf(unsyncedEntries));
+        unsyncedEntries.clear();
+        return true;
+    }
+
+    /** The last index of our own log that is on stable storage (always the last index without group commit). */
+    private long lastDurableIndex() {
+        return log.lastIndex() - unsyncedEntries.size();
+    }
+
+    /** Heartbeats and ReadIndex rounds: every peer gets an AppendEntries now, with entries if there is room. */
     private void sendAppendEntriesToAll() {
         for (int peer : peers) {
-            sendAppendEntries(peer);
+            expireLostAppends(peer);
+            sendAppendEntries(peer, true);
+        }
+    }
+
+    /** New entries: every peer whose window has room gets them now; the others get them as answers come back. */
+    private void replicateToAll() {
+        for (int peer : peers) {
+            sendAppendEntries(peer, false);
         }
     }
 
     /**
      * [Fig2 Leader-3] If last log index >= nextIndex for a follower: send AppendEntries RPC with
      * log entries starting at nextIndex. With nothing new to send, this is a heartbeat.
+     *
+     * <p>Flow control (beyond Figure 2), set by {@code config.maxAppendsInFlight()}:
+     * <ul>
+     *   <li>0, no limit (the baseline): every call sends everything from nextIndex, so a burst of
+     *       proposals sends the same entries again and again.
+     *   <li>n >= 1: at most n requests carrying entries are unanswered per follower, and each one
+     *       continues after the last entry already sent (sentIndex), so every entry is sent once.
+     *       Entries proposed while the window is full wait and leave together, in one request,
+     *       when an answer frees a slot: that is batching (n = 1). With n > 1 the next batch
+     *       leaves before the previous one is answered: pipelining.
+     * </ul>
+     * Either way a follower only gets entries that are durable on the leader, and nextIndex and
+     * matchIndex move only when a reply arrives (matchIndex only on success).
+     *
+     * @param heartbeat send even if there are no entries to send or no room in the window
      */
-    private void sendAppendEntries(int peer) {
+    private void sendAppendEntries(int peer, boolean heartbeat) {
         long next = nextIndex.get(peer);
         if (next <= log.snapshotIndex()) {
+            restartWindow(peer);
             sendSnapshot(peer); // the entries this follower needs were compacted away
             return;
         }
         transfers.remove(peer);
-        long prevIndex = next - 1;
-        long lastToSend = Math.min(log.lastIndex(), prevIndex + config.maxEntriesPerAppend());
+        boolean limited = config.maxAppendsInFlight() > 0;
+        long first = limited ? Math.max(next, sentIndex.get(peer) + 1) : next; // first entry to send
+        long last = Math.min(lastDurableIndex(), first + config.maxEntriesPerAppend() - 1);
+        boolean windowHasRoom = !limited || appendsInFlight.get(peer) < config.maxAppendsInFlight();
+        boolean sendEntries = windowHasRoom && first <= last;
+        if (!sendEntries && !heartbeat) {
+            return;
+        }
+        long prevIndex = sendEntries ? first - 1 : next - 1; // a bare heartbeat checks the acknowledged position
         AppendEntriesRequest request = AppendEntriesRequest.newBuilder()
                 .setTerm(currentTerm)
                 .setLeaderId(id)
                 .setPrevLogIndex(prevIndex)
                 .setPrevLogTerm(log.termAt(prevIndex))
-                .addAllEntries(log.slice(next, lastToSend))
+                .addAllEntries(sendEntries ? log.slice(first, last) : List.of())
                 .setLeaderCommit(commitIndex)
                 .build();
+        if (sendEntries && limited) {
+            if (appendsInFlight.get(peer) == 0) {
+                windowMovedMillis.put(peer, scheduler.nowMillis());
+            }
+            appendsInFlight.put(peer, appendsInFlight.get(peer) + 1);
+            sentIndex.put(peer, last);
+        }
         long round = heartbeatRound; // this message counts toward rounds up to and including this one
         transport.appendEntries(peer, request, reply -> onAppendEntriesReply(peer, request, round, reply));
+    }
+
+    /** Forgets what is in flight to this peer: the next request starts again at nextIndex. */
+    private void restartWindow(int peer) {
+        appendsInFlight.put(peer, 0);
+        sentIndex.put(peer, nextIndex.get(peer) - 1);
+        windowMovedMillis.put(peer, scheduler.nowMillis());
+    }
+
+    /**
+     * The transport never reports a lost request or reply. If requests are in flight to this peer
+     * but no answer to any of them came for a whole minimum election timeout, assume they were
+     * lost and start again at nextIndex. (If one was only slow, its late answer is still handled
+     * normally: entries are just sent twice.)
+     */
+    private void expireLostAppends(int peer) {
+        if (config.maxAppendsInFlight() > 0 && appendsInFlight.get(peer) > 0
+                && scheduler.nowMillis() - windowMovedMillis.get(peer) >= config.electionTimeoutMinMs()) {
+            restartWindow(peer);
+        }
     }
 
     private void onAppendEntriesReply(int peer, AppendEntriesRequest request, long round, AppendEntriesReply reply) {
@@ -818,19 +938,24 @@ public final class RaftNode implements RaftRpcHandler {
             acknowledgedRound.put(peer, round);
             serveReadsIfPossible();
         }
+        if (request.getEntriesCount() > 0 && config.maxAppendsInFlight() > 0) {
+            // An answer frees a slot in this peer's window (never below 0: the window may have
+            // been restarted while this request was in flight).
+            appendsInFlight.put(peer, Math.max(0, appendsInFlight.get(peer) - 1));
+            windowMovedMillis.put(peer, scheduler.nowMillis());
+        }
 
         if (reply.getSuccess()) {
             // [Fig2 Leader-3] If successful: update nextIndex and matchIndex for follower.
-            // Replies can arrive out of order, so never move either backwards.
+            // Replies can arrive out of order, so never move either backwards. This is the only
+            // place matchIndex moves: never from what was merely sent.
             long match = request.getPrevLogIndex() + request.getEntriesCount();
             if (match > matchIndex.get(peer)) {
                 matchIndex.put(peer, match);
             }
             nextIndex.put(peer, Math.max(nextIndex.get(peer), match + 1));
             advanceCommitIndex();
-            if (nextIndex.get(peer) <= log.lastIndex()) {
-                sendAppendEntries(peer); // the follower is still behind; keep going
-            }
+            sendAppendEntries(peer, false); // more entries waiting for this follower: send them
             return;
         }
 
@@ -839,9 +964,14 @@ public final class RaftNode implements RaftRpcHandler {
         long backedUp = Math.max(fastBackupNextIndex(reply), matchIndex.get(peer) + 1);
         if (backedUp < nextIndex.get(peer)) {
             nextIndex.put(peer, backedUp);
-            sendAppendEntries(peer);
+        } else if (config.maxAppendsInFlight() == 0 || request.getPrevLogIndex() < nextIndex.get(peer)) {
+            return; // a stale failure for a position we already moved past; ignore it
         }
-        // Otherwise this is a stale failure for a position we already moved past; ignore it.
+        // Either nextIndex moved back, or (pipelining) a request sent beyond the acknowledged
+        // position was refused, e.g. because it overtook an earlier one: the requests after it
+        // fail too, so start the window again at nextIndex.
+        restartWindow(peer);
+        sendAppendEntries(peer, true);
     }
 
     /**
@@ -865,7 +995,9 @@ public final class RaftNode implements RaftRpcHandler {
      * matchIndex[i] >= N, and log[N].term == currentTerm: set commitIndex = N.
      */
     private void advanceCommitIndex() {
-        for (long n = log.lastIndex(); n > commitIndex; n--) {
+        // Start at our last DURABLE entry: the leader counts itself below (replicas = 1), which is
+        // only true for entries on its own disk. (Followers never get the others, see sendAppendEntries.)
+        for (long n = lastDurableIndex(); n > commitIndex; n--) {
             // Only entries from the current term are committed by counting replicas (§5.4.2,
             // Figure 8). Earlier entries are then committed indirectly by the Log Matching
             // Property. Terms never decrease along the log, so we can stop at the first older one.
@@ -967,7 +1099,8 @@ public final class RaftNode implements RaftRpcHandler {
         // Move nextIndex past it and let AppendEntries' consistency check establish matchIndex.
         transfers.remove(peer);
         nextIndex.put(peer, Math.max(nextIndex.get(peer), transfer.index + 1));
-        sendAppendEntries(peer);
+        restartWindow(peer);
+        sendAppendEntries(peer, true);
     }
 
     // ================================================================== snapshots: receiving (follower)
@@ -1067,6 +1200,7 @@ public final class RaftNode implements RaftRpcHandler {
         if (config.snapshotThreshold() == 0 || lastApplied - log.snapshotIndex() < config.snapshotThreshold()) {
             return;
         }
+        flushOwnEntries(); // the rewrite below writes the whole log; pending entries must not be written twice
         long index = lastApplied;
         long term = log.termAt(index);
         storage.snapshots().save(index, term, stateMachine.takeSnapshot());

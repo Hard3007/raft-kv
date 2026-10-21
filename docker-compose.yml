@@ -3,12 +3,12 @@
 #   curl localhost:8081/status              # node 1 (nodes 1-5: status 8081-8085, gRPC 7001-7005)
 #   docker compose -p raftkv down           # stop (add -v to delete the data volumes)
 #
-# Each node: 384 MB memory limit (JVM heap 256 MB, see Dockerfile), data on its own named
+# Each node: 448 MB memory limit (JVM heap 256 MB plus capped off-heap memory, see Dockerfile), data on its own named
 # volume (so kill + restart recovers from disk), health check on /status.
 
 x-node: &node
   image: raft-kv:local
-  mem_limit: 384m
+  mem_limit: 448m
   restart: unless-stopped
   stop_grace_period: 10s
 
@@ -16,6 +16,11 @@ x-cluster: &cluster
   CLUSTER: "1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000"
   # Entries between snapshots; scripts/docker-chaos.sh lowers it so chaos exercises snapshots.
   SNAPSHOT_THRESHOLD: "${SNAPSHOT_THRESHOLD:-10000}"
+  # Replication settings (RaftConfig); scripts/bench.sh compare sets them to measure each optimization.
+  MAX_APPENDS_IN_FLIGHT: "${MAX_APPENDS_IN_FLIGHT:-4}"
+  GROUP_COMMIT: "${GROUP_COMMIT:-true}"
+  # Randomized election timeout, min-max ms (Raft paper: 150-300). Benchmark reports state it.
+  ELECTION_TIMEOUT_MS: "${ELECTION_TIMEOUT_MS:-150-300}"
 
 services:
   node1:

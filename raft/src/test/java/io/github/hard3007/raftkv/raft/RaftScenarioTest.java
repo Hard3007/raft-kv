@@ -50,9 +50,15 @@ class RaftScenarioTest {
     @ParameterizedTest(name = "seed {0}")
     @MethodSource(SEEDS)
     void figure8_leaderDoesNotCommitPreviousTermEntryByCountingReplicas(long seed) {
-        RaftCluster cluster = new RaftCluster(5, seed, SLOW.withMaxEntriesPerAppend(1));
-        cluster.setConfig(1, FAST.withMaxEntriesPerAppend(1));
-        cluster.setConfig(5, BASE.withElectionTimeout(100, 150).withMaxEntriesPerAppend(1));
+        // One entry per AppendEntries (DESIGN.md §2.5), and no group commit: the message filter
+        // below decides from the receiver's log when a request is SENT. With group commit the
+        // no-op leaves in its own flush message, which can be overtaken by the backed-up index-2
+        // message and then (legitimately) accepted, so the Figure 8 situation is never set up.
+        // The commit rule under test does not depend on group commit; the randomized Figure 8
+        // test (RaftPersistenceTest) runs with it.
+        RaftCluster cluster = new RaftCluster(5, seed, SLOW.withMaxEntriesPerAppend(1).withGroupCommit(false));
+        cluster.setConfig(1, FAST.withMaxEntriesPerAppend(1).withGroupCommit(false));
+        cluster.setConfig(5, BASE.withElectionTimeout(100, 150).withMaxEntriesPerAppend(1).withGroupCommit(false));
         LogEntry first = entry(1, 1, "a");
         cluster.seedPersistentState(1, 3, 0, List.of(first, entry(2, 2, "t2")));
         for (int i = 2; i <= 4; i++) {

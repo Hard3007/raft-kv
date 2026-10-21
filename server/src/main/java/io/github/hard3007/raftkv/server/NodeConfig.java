@@ -32,6 +32,8 @@ public record NodeConfig(int id, Map<Integer, String> cluster, int grpcPort, int
      *   NODE_ID=1
      *   CLUSTER=1=node1:7000,2=node2:7000,3=node3:7000,4=node4:7000,5=node5:7000
      *   GRPC_PORT=7000  STATUS_PORT=8080  DATA_DIR=/data  SNAPSHOT_THRESHOLD=10000
+     *   MAX_APPENDS_IN_FLIGHT=4  GROUP_COMMIT=true   (replication settings; see RaftConfig)
+     *   ELECTION_TIMEOUT_MS=150-300                  (min-max; raise it only for slow disks, see BENCHMARKS.md)
      * </pre>
      */
     public static NodeConfig fromEnvironment(Map<String, String> env) {
@@ -41,12 +43,18 @@ public record NodeConfig(int id, Map<Integer, String> cluster, int grpcPort, int
             String[] parts = member.trim().split("=", 2);
             cluster.put(Integer.parseInt(parts[0]), parts[1]);
         }
+        String[] timeout = env.getOrDefault("ELECTION_TIMEOUT_MS", "150-300").split("-", 2);
         return new NodeConfig(id, cluster,
                 Integer.parseInt(env.getOrDefault("GRPC_PORT", "7000")),
                 Integer.parseInt(env.getOrDefault("STATUS_PORT", "8080")),
                 Path.of(env.getOrDefault("DATA_DIR", "/data")),
                 RaftConfig.defaults()
-                        .withSnapshotThreshold(Long.parseLong(env.getOrDefault("SNAPSHOT_THRESHOLD", "10000"))),
+                        .withElectionTimeout(Integer.parseInt(timeout[0].trim()), Integer.parseInt(timeout[1].trim()))
+                        .withSnapshotThreshold(Long.parseLong(env.getOrDefault("SNAPSHOT_THRESHOLD", "10000")))
+                        .withMaxAppendsInFlight(Integer.parseInt(env.getOrDefault("MAX_APPENDS_IN_FLIGHT",
+                                String.valueOf(RaftConfig.defaults().maxAppendsInFlight()))))
+                        .withGroupCommit(Boolean.parseBoolean(env.getOrDefault("GROUP_COMMIT",
+                                String.valueOf(RaftConfig.defaults().groupCommit())))),
                 Long.parseLong(env.getOrDefault("RPC_TIMEOUT_MS", "500")));
     }
 
